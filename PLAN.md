@@ -1,9 +1,8 @@
 # Rencana Porting LineageOS 18.1 — OPPO A37f (MSM8916)
 
-> **Status:** Fase 1–2 selesai, terverifikasi & lolos tes build (`lunch` + `m nothing` + `m dtimage`).
-> Fase 3–4 diverifikasi & lolos `m check-vintf-all` (COMPATIBLE); konfigurasinya ikut
-> lolos parse penuh, tapi belum divalidasi compile penuh. Fase 5 diverifikasi & diperbaiki.
-> Fase 6–8 diverifikasi & diperbaiki. Tersisa Fase 9: build penuh (`mka bacon`).
+> **Status:** Fase 1–8 selesai & terverifikasi. **Fase 9: `mka bacon` BERHASIL** —
+> `lineage-18.1-20260802-UNOFFICIAL-rigaz29-A37.zip` (484 MB) ter-build, boot.img
+> tervalidasi terhadap ROM 18.1 A37 yang beredar. Belum diuji di hardware.
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -16,7 +15,7 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `a2b976b` (port + fix build/VINTF/sepolicy/blob/init) | ✅ Fase 2–7 lolos semua tes |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `763716b` (port + fix build/VINTF/sepolicy/blob/init/compile) | ✅ Fase 2–9 — ROM ter-build |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `rigaz29/rb-vendor_oppo_A37` | `lineage-18.1` @ `8349a48` (repo baru, dari `6a64435` + fix Fase 6) | ✅ Fase 6 selesai |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
@@ -784,10 +783,81 @@ terpengaruh. Sudah didokumentasikan di komentar `A37.xml`.
 
 **Strategi: boot dulu, fitur menyusul**
 
-1. [ ] `repo sync` dengan manifest baru
-2. [ ] `source build/envsetup.sh && breakfast lineage_A37-userdebug`
-3. [ ] `mka bacon` — perbaiki error kompilasi satu per satu
+1. [x] `repo sync` dengan manifest baru
+2. [x] `source build/envsetup.sh && breakfast lineage_A37-userdebug`
+3. [x] `mka bacon` — perbaiki error kompilasi satu per satu
 4. [ ] Flash, target: **boot sampai homescreen**
+
+### ✅ BUILD PERTAMA BERHASIL (2 Agu 2026, commit `763716b`)
+
+```
+[100% 9868/9868] build bacon
+Package Complete: out/target/product/A37/lineage-18.1-20260802-UNOFFICIAL-rigaz29-A37.zip
+#### build completed successfully (54:31) ####
+```
+
+| Artefak | Ukuran |
+|---|---|
+| `lineage-18.1-20260802-UNOFFICIAL-rigaz29-A37.zip` | 484,1 MB |
+| `boot.img` | 17,0 MB |
+| `dt.img` | 210.944 B |
+
+`mka bacon -j12` di mesin 11,7 GB RAM + 31 GB swap, ccache hangat. Tiga kali
+jalan: gagal di 30%, gagal di 80%, lalu tuntas.
+
+#### 2 blocker compile — keduanya di device tree, bukan platform
+
+**`libinit_msm8916` — dua kegagalan berurutan.**
+
+`fmt/chrono.h file not found`. Di Android 11 `android-base/result.h` menarik
+`android-base/format.h` yang memakai fmtlib, jadi `include_dirs` mentah ke
+`system/core/base/include` tidak cukup. fmtlib melarang di-link langsung
+(`external/fmtlib/Android.bp:18`) dan `libbase` sudah mengekspornya lewat
+`export_static_lib_headers` (`system/core/base/Android.bp:131`) → tambah
+`static_libs: ["libbase"]`.
+
+Lalu `android::init::property_set` hilang dari `property_service.h`.
+Penggantinya `InitPropertySet` (`property_service.cpp:607`) **tidak diekspor
+header mana pun**, dan `android::base::SetProperty` juga salah di sini karena
+`vendor_load_properties()` dipanggil dari `PropertyLoadBootDefaults()`
+(`property_service.cpp:877,917`) — **sebelum** `StartPropertyService()`, jadi
+socket property belum ada. Solusi: tulis langsung ke property area lewat
+`__system_property_find/update/add`, pola yang sama dengan `PropertySet`
+(`property_service.cpp:179-193`).
+
+**`libshim_camera` — konstruktor `AudioSource` berubah.**
+
+```
+ld.lld: error: undefined symbol: android::AudioSource::AudioSource(
+  audio_source_t, android::String16 const&, ...)
+```
+
+Android 11 mengganti parameter pertama dari `audio_source_t` menjadi
+`const audio_attributes_t*` (`AudioSource.h:39-49`). Simbol yang benar
+diverifikasi langsung dari ekspor `libstagefright.so` (`llvm-readelf --dyn-syms`).
+Shim sekarang membangun `audio_attributes_t` dari `inputSource`.
+
+> Sekalian diperbaiki bug ABI lama: nama mangled konstruktor tidak memuat
+> `this` karena implisit, tapi shim lama mendeklarasikan **kedua** simbol tanpa
+> `this` — seluruh argumen tergeser satu register. Sekarang eksplisit di kedua sisi.
+
+#### Validasi boot.img terhadap ROM 18.1 A37 yang beredar
+
+| | Kita | Referensi |
+|---|---|---|
+| kernel addr | `0x80008000` | `0x80008000` ✅ |
+| ramdisk addr / size | `0x81000000` / 864.230 B | `0x81000000` / 864.325 B ✅ |
+| tags addr | `0x80000100` | `0x80000100` ✅ |
+| page size | 2048 | 2048 ✅ |
+| **dt_size** | **210.944 B** | **210.944 B** ✅ identik |
+
+Struktur zip juga sama (`system.new.dat.br` + `system.transfer.list` +
+`boot.img` + `updater-script`). Kernel kita 16,7 MB vs 20,1 MB — wajar, config
+berbeda.
+
+> **Belum diuji di hardware.** Build sukses membuktikan seluruh tree
+> ter-compile dan ter-package, bukan bahwa device boot. Langkah berikutnya
+> flash + kumpulkan log.
 5. [ ] Kumpulkan log: `logcat -b all`, `dmesg`, `cat /proc/last_kmsg`
 6. [ ] Identifikasi HAL yang gagal register → perbaiki manifest.xml / device.mk
 7. [ ] Iterasi sampai stabil
@@ -872,6 +942,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **FASE 9: BUILD PERTAMA BERHASIL** (commit `763716b`). `mka bacon -j12` tuntas dalam 54:31 → `lineage-18.1-20260802-UNOFFICIAL-rigaz29-A37.zip` 484 MB. Dua blocker compile diperbaiki, keduanya di device tree: `libinit_msm8916` (fmtlib tidak di include path setelah `result.h` memakainya di Android 11, plus `property_set` dihapus dari `property_service.h` — penggantinya tidak diekspor header dan `SetProperty` salah karena `vendor_load_properties` berjalan sebelum `StartPropertyService`) dan `libshim_camera` (konstruktor `AudioSource` ganti parameter pertama dari `audio_source_t` ke `const audio_attributes_t*`; sekalian diperbaiki bug ABI lama yang melupakan `this`). boot.img hasil build tervalidasi terhadap ROM 18.1 A37 yang beredar: geometri identik dan `dt_size` sama persis 210.944 byte. Belum diuji di hardware. |
 | 2 Agu 2026 | **Fase 8 dikerjakan & diuji**: `A37.xml` ditulis ke repo manifest (sebelumnya cuma berisi PLAN.md) dan dipasang di `.repo/local_manifests/`. Keempat `project@revision` diverifikasi resolve di remote dengan SHA yang cocok persis dengan tree kerja. `device/qcom/sepolicy-legacy` sengaja tidak dideklarasikan karena sudah disediakan `snippets/lineage.xml:64` lengkap dengan revision `lineage-18.1-legacy`. `external/stlport` terbukti tidak diperlukan dan dihapus dari `lineage.dependencies` (`a2b976b`). Ditemukan: tree lama butuh `repo sync --force-sync vendor/oppo` sekali karena nama project vendor berubah — sudah didokumentasikan di komentar manifest. |
 | 2 Agu 2026 | **Fase 7 dikerjakan & diuji** (commit `c8dc9ab`) memakai `host_init_verifier`, validator init bawaan Android 11. Dua bug: `load_system_props` deprecated bikin build gagal (dihapus; di runtime pun sudah no-op), dan `/firmware` tidak pernah berlabel `firmware_file` karena vfat tanpa xattr jatuh ke `genfscon vfat -> vfat` sementara policy device memberi izin ke `firmware_file` — ditambahkan opsi mount `context=`. Terverifikasi benar: import path, `ueventd` di `/vendor/ueventd.rc`, `init.recovery.qcom.rc` di `/`, `mount_all`/`swapon_all`, dan 16 service menunjuk biner yang ada. Klaim rencana soal penamaan `ueventd.qcom.rc` dikoreksi: yang berubah nama modul, bukan file terpasang. Cek label service sempat false-positive; dikoreksi dengan membaca xattr asli dari image ROM referensi. |
 | 2 Agu 2026 | **Fase 6 dikerjakan & diuji** (device `3c9651b`, vendor `8349a48`): analisis `DT_NEEDED` atas 302 blob ELF menemukan 6 library hilang; `libthermalclient.so` diambil dari ROM 18.1 A37 yang beredar (rantai `libqti-perfd-client` → `libqti-perfd` → `libthermalclient`), 5 sisanya juga absen di ROM referensi. Dua bug daftar blob: `libmmcamera_tuning.so` ada di repo tapi tak pernah dipasang padahal di-`dlopen` `libmm-qcamera`/`liboemcamera`, dan `sensors.a6000.so` sisa port Lenovo A6000 disalin ke direktori salah. Hasil: 338 terdaftar = 338 di disk. Duplicate rule `libmm-omxcore` ditelusuri sampai tuntas (blob yang menang; menghapus dari PRODUCT_PACKAGES tidak menolong karena ditarik lewat dependensi) lalu didokumentasikan, bukan diubah. Repo vendor sendiri dibuat: `rigaz29/rb-vendor_oppo_A37`. |
