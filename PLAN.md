@@ -1,6 +1,7 @@
 # Rencana Porting LineageOS 18.1 — OPPO A37f (MSM8916)
 
-> **Status:** Fase 1–2 selesai, Fase 3–9 belum dikerjakan
+> **Status:** Fase 1–2 selesai & terverifikasi build. Fase 3–4 sudah punya commit di device tree
+> (`475313f`, `d13d764`) tapi belum divalidasi build. Fase 5–9 belum dikerjakan.
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -14,7 +15,7 @@
 | Repo | Branch | Status |
 |---|---|---|
 | `rigaz29/rb_device_oppo_A37` | `lineage-18.1` (dari `rb` 547f8ca + 1 commit port) | ✅ Fase 2 selesai |
-| `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` (dari `lz4-backport` 70ef81d + 6 commit a12-prep) | ✅ Fase 1 selesai |
+| `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `35e50af` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 2 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `meghs-playground/rb-vendor_oppo_A37` | `lineage-17.1` (pin `6a64435`) | ⬜ Perlu branch `lineage-18.1` |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
 | `LineageOS/android_external_stlport` | `lineage-15.1` | ⬜ Cek apakah masih diperlukan |
@@ -29,8 +30,15 @@ File riset tersimpan di `/tmp/a37-research/` (diff resmi, BoardConfig/manifest/d
 
 Branch `lineage-18.1` dibuat dari `lz4-backport` (70ef81d) + cherry-pick **6 commit** dari `a12-prep`:
 
-- [x] `51b5a87` — defconfig: pre-create 32 loop devices untuk APEX (sudah `=y` di base, no-op)
-  - ✅ Terverifikasi: `apexd_loop.cpp` butuh loop device untuk mount APEX. Commit no-op.
+- [x] `51b5a87` — defconfig: pre-create 32 loop devices untuk APEX
+  - ⚠️ **Koreksi:** commit ini BUKAN no-op secara config — default `BLK_DEV_LOOP_MIN_COUNT`
+    di 3.10 adalah **8** (`drivers/block/Kconfig:254`), commit menaikkannya ke 32.
+    Yang membuatnya tak berdampak adalah hal lain: di Android 11
+    `build/make/core/board_config.mk:619` menyetel `TARGET_FLATTEN_APEX := true`
+    sebagai **default**, dan A37 tidak inherit `updatable_apex.mk` → APEX tetap
+    flattened → loop device tidak dipakai untuk APEX. Harmless, dipertahankan.
+    (Konsekuensi: menghapus `TARGET_FLATTEN_APEX := true` dari BoardConfig — seperti
+    yang dilakukan msm8916-common — aman, karena default-nya memang `true`.)
 - [x] `1433539` — defconfig: enable disk quota (`CONFIG_QUOTA`)
   - ⚠️ Direkomendasikan, bukan wajib platform. Konsumen = `fs_mgr.cpp:358` (flag `quota`
     di fstab), bukan vold. Fstab A37 saat ini belum punya flag `quota` → belum boot-kritis.
@@ -40,17 +48,23 @@ Branch `lineage-18.1` dibuat dari `lz4-backport` (70ef81d) + cherry-pick **6 com
   - ✅ Wajib. `lmkd.cpp:79-81` baca `/dev/memcg/memory.usage_in_bytes`. Tanpa memcg
     + tanpa in-kernel LMK → lmkd exit → OOM tak terkendali.
 - [x] `9ed22f6` — defconfig: disable in-kernel LMK → pakai lmkd userspace
-  - ⚠️ Tepat, sesuai referensi resmi. lmkd auto-detect (`lmkd.cpp:2942`): jika
-    `/sys/module/lowmemorykiller/` ada → pakai in-kernel legacy. Disable = pilihan
-    modern (swap-aware). lmkd fallback otomatis ke vmpressure tanpa perlu
-    `ro.lmk.use_psi=false` (baris 2877) — properti itu opsional.
+  - ✅ **Rantai lengkap tervalidasi terhadap source:** `lmkd.cpp:3055` cek
+    `/sys/module/lowmemorykiller/parameters/minfree` → tidak ada → `use_inkernel_interface
+    = false` → `init_monitors()` (`lmkd.cpp:2975`) coba PSI dulu, gagal (3.10 tanpa PSI),
+    **fallback vmpressure berhasil**. Kernel ini memang punya `mm/vmpressure.c`,
+    `memory.pressure_level` (`mm/memcontrol.c:6000`) dan `cgroup.event_control`
+    (`kernel/cgroup.c:4040`). `ro.lmk.use_psi=false` tetap opsional.
 - [x] `d5d353a` — kbuild: mkdir -p output directory (fix build lewat soong)
   - ✅ Wajib. `vendor/lineage/build/soong/Android.bp` modul `generated_kernel_includes`:
     sbox hapus dir → `make O=<dir> headers_install` → kernel 3.10 gagal tanpa mkdir.
 - [x] `fbfa62e` — dts: tambah `first_stage_mount` di fstab system
-  - ⚠️ No-op di 18.1 untuk A37. `first_stage_mount.cpp:159-173`: filtering flag hanya
+  - ⚠️ No-op secara fungsi di 18.1. `first_stage_mount.cpp:159-173`: filtering flag hanya
     untuk file fstab, A37 pakai DT fstab → semua entri di-mount tanpa filter.
     Baru wajib di Android 12. Harmless, dipertahankan sebagai persiapan.
+  - ✅ **Tapi patch-nya kena sasaran.** Commit menyentuh `arch/arm/boot/dts/qcom/msm8916.dtsi`
+    padahal kernel di-build `arm64`. Ternyata `arch/arm64/boot/dts/qcom` adalah **symlink**
+    ke `../../../arm/boot/dts/qcom/`, jadi DTS itu memang yang dipakai. Terkonfirmasi:
+    string `first_stage_mount` / `android,fstab` ada di dalam DTB hasil kompilasi.
 
 > **Kenapa a12-prep gagal boot Android 12 tapi aman untuk 18.1?**
 > Ke-6 commit hanya mengubah defconfig/dts/Makefile. Yang membuat Android 12
@@ -62,24 +76,97 @@ Pushed ke: https://github.com/rigaz29/kernel_oppo_msm8939/tree/lineage-18.1
 
 ### Verifikasi kernel vs LOS 18.1 (dari source tree `/root/los18`)
 
-Commit tambahan: `7a9d4eb` — 4 config baru dari verifikasi:
-- [x] `CONFIG_FHANDLE=y` — tidak default y, untuk open_by_handle_at (vold)
-- [x] `CONFIG_ENCRYPTED_KEYS=y` — untuk keymaster
-- [x] `CONFIG_CRYPTO_SHA256=y` — SHA2_ARM64_CE tidak auto-select ini
-- [x] `CONFIG_DEBUG_SET_MODULE_RONX=y` — security hardening
+Commit `7a9d4eb` — 4 config, **diuji ulang dengan build nyata; hanya 2 yang benar-benar berefek:**
+
+| Config | Hasil uji |
+|---|---|
+| `CONFIG_ENCRYPTED_KEYS=y` | ✅ Mendarat di `.config`, efektif |
+| `CONFIG_FHANDLE=y` | ⚠️ Mendarat (+ auto-select `EXPORTFS`), **tapi rasionalnya keliru**. Tidak ada satu pun konsumen `open_by_handle_at`/`name_to_handle_at` di `system/`, `frameworks/` — hanya muncul di header syscall bionic. Dan AOSP justru **mewajibkan mati**: `# CONFIG_FHANDLE is not set` di `kernel/configs/{q,r}/android-4.14/android-base.config`. Pertimbangkan revert |
+| `CONFIG_CRYPTO_SHA256=y` | ⚠️ **Redundan** — sudah `=y` di defconfig asli, di-`select` oleh `drivers/crypto/Kconfig:43`. Harmless |
+| `CONFIG_DEBUG_SET_MODULE_RONX=y` | ❌ **Tidak mendarat.** `arch/arm64/Kconfig.debug:54` → `depends on MODULES`, sedangkan `CONFIG_MODULES is not set` (kernel monolitik). Baris ini dibuang Kconfig tanpa error |
 
 **Tidak perlu backport source code.** Semua gap kernel 3.10 ditangani fallback userspace:
 
 | Fitur | Status | Fallback |
 |---|---|---|
-| memfd_create | ✅ Sudah di-backport di kernel | `TARGET_HAS_MEMFD_BACKPORT` skip version gate ART/perfetto |
+| memfd_create | ✅ Sudah di-backport (`mm/shmem.c:2678`, `__NR_memfd_create 385`) | `TARGET_HAS_MEMFD_BACKPORT` skip version gate ART/perfetto |
+| getrandom | ✅ Sudah di-backport (`__NR_getrandom 384`) | — |
+| vmpressure | ✅ Ada (`mm/vmpressure.c`, `memory.pressure_level` di `mm/memcontrol.c:6000`) | Jadi tumpuan lmkd, lihat `9ed22f6` |
 | BinderFS | ❌ Tidak ada (kernel 5.0+) | Legacy device nodes `binder,hwbinder,vndbinder` cukup |
-| BPF/eBPF | ❌ Tidak ada (kernel 3.18+) | netd fallback ke iptables (`BpfUtils.cpp: kver < 4.9 → NONE`) |
-| PSI | ❌ Tidak ada (kernel 4.20+) | lmkd fallback ke vmpressure (`lmkd.cpp:2877`) |
-| schedtune | ❌ Tidak ada | Fallback ke cpu cgroup (`sched_policy.cpp`) |
+| BPF/eBPF | ❌ Tidak ada (kernel 3.18+) | netd fallback ke iptables. **Gate sebenarnya bukan versi kernel** — `BpfUtils.cpp:151` cek `api_level < MINIMUM_API_REQUIRED (28)` → `BpfLevel::NONE`. `ro.product.first_api_level=19` yang mematikannya |
+| `xt_owner` | ❌ Tidak di-enable | Tidak perlu: **`xt_qtaguid.c:2974` mendaftarkan match bernama `"owner"` revisi 1**, persis yang dipakai `FirewallController.cpp:277` / `BandwidthController.cpp:232` |
+| PSI | ❌ Tidak ada (kernel 4.20+) | lmkd fallback ke vmpressure (`lmkd.cpp:2975`, bukan 2877) |
+| schedtune | ❌ Tidak ada | Fallback ke cpu cgroup. Mount gagal → `cgroup_map_write.cpp:388` hanya `LOG(WARNING)` lalu lanjut, **non-fatal** |
+| cgroup v2 (freezer) | ❌ Tidak ada | Sama — non-fatal, hanya warning |
+| `SYNC_FILE` | ❌ Tidak ada | `libsync/sync.c:109` mendukung legacy staging uapi; kernel punya `CONFIG_SYNC`/`SW_SYNC` |
+| `FS_ENCRYPTION` (FBE) | ❌ Tidak ada | Device pakai FDE (`fstab.qcom:6` → `encryptable=footer`) + `TARGET_LEGACY_HW_DISK_ENCRYPTION := true` |
+| FUSE (scoped storage) | — | `VolumeManager.cpp:388` baca `persist.sys.fuse` default **false**; `CONFIG_SDCARD_FS=y` → tetap jalur sdcardfs yang cepat |
 | ION | ✅ Masih supported | DMA-BUF transition baru di Android 12+ |
 | FS_VERITY | ❌ Tidak ada (kernel 5.4+) | Opsional, tidak dipakai kecuali fstab flag `fsverity` |
+| `OVERLAY_FS`, `UID_SYS_STATS` | ❌ Tidak ada di 3.10 | `adb remount` overlay mati; battery stats per-UID terdegradasi. **Tidak sepadan di-backport** untuk target "boot dulu" |
 | Kernel patches LOS | ✅ Tidak ada | `vendor/lineage/patches/` tidak ada |
+
+Audit penuh terhadap `kernel/configs/r/android-4.14/android-base.config` (250 syarat):
+**187 terpenuhi, 39 absen, 24 beda nilai** sebelum patch di bawah. Tidak ada yang boot-kritis.
+
+### Patch pengerasan defconfig (commit `35e50af`)
+
+Diterapkan ke `arch/arm64/configs/lineageos_a37f_defconfig` — **defconfig yang benar-benar
+di-build** (`TARGET_KERNEL_ARCH := arm64`).
+
+**Bug nyata yang diperbaiki:**
+
+- `CONFIG_STACKPROTECTOR=y` → `CONFIG_CC_STACKPROTECTOR=y` + `CONFIG_CC_STACKPROTECTOR_REGULAR=y`
+  - Commit `e8bab6d7a92` ("...add stack protector") memakai nama symbol yang **tidak ada di
+    kernel 3.10** — di sini namanya `CC_STACKPROTECTOR` (`arch/Kconfig:350`); rename ke
+    `STACKPROTECTOR` baru terjadi di Linux 4.18. Kconfig membuang baris tak dikenal tanpa
+    error, jadi stack protector **tidak pernah aktif** sejak commit itu.
+
+**Tambahan fungsional (semua terverifikasi mendarat di `.config`):**
+
+| Opsi | Alasan |
+|---|---|
+| `CONFIG_IP_MULTICAST=y` | mDNS / `NsdManager`, Cast, penemuan printer — sebelumnya mati |
+| `CONFIG_INET_UDP_DIAG=y` | netd `SockDiag` destroy socket UDP saat ganti network / VPN |
+| `CONFIG_VETH=y` | tethering / network stack Android 11 |
+| `CONFIG_NET_SCH_INGRESS=y`, `CONFIG_XFRM_STATISTICS=y` | syarat `android-base.config` R |
+| `CONFIG_TASKSTATS` + `TASK_XACCT` + `TASK_IO_ACCOUNTING` + `TASK_DELAY_ACCT` | `/proc/<pid>/io` → StorageStats & BatteryStats |
+| `CONFIG_MEMCG_SWAP=y` | akunting swap memcg (device pakai zram) |
+| `CONFIG_UTS_NS=y`, `CONFIG_PID_NS=y` | syarat `android-base.config` R, biaya nol |
+| `CONFIG_IKCONFIG=y` + `IKCONFIG_PROC=y` | `/proc/config.gz` untuk debug (dimatikan `e8bab6d`) |
+
+### Hasil tes build (2 Agu 2026)
+
+Toolchain persis seperti `vendor/lineage/build/tasks/kernel.mk`: GCC 4.9
+(`aarch64-linux-android-4.9`) + `HOSTCFLAGS="-fuse-ld=lld"`, tanpa `TARGET_KERNEL_CLANG_COMPILE`.
+
+| Build | Konfigurasi | Hasil |
+|---|---|---|
+| 1 | defconfig asli @ `fbfa62e` | ✅ Image 16.592.888 B, 4 warning, 0 error |
+| 2 | + patch pengerasan (15 opsi) | ✅ Image 16.729.272 B, 4 warning, 0 error |
+| 3 | + 4 config dari `7a9d4eb` (final) | ✅ Image 16.729.272 B, 4 warning, 0 error |
+
+- `make dtbs` → `msm8916-mtp-15399.dtb` 207.455 B; node `first_stage_mount` / `android,fstab`
+  terkonfirmasi ada di dalam DTB hasil kompilasi
+- `make headers_install` ke direktori output baru → exit 0, membuktikan `d5d353a` berfungsi
+- `generated_kernel_includes` (`vendor/lineage/build/soong/Android.bp:20`) meng-export
+  `usr/audio/include/uapi`, `usr/include/audio`, `usr/techpack/audio/include` yang **tidak
+  dihasilkan** kernel 3.10 ini. Aman: `generator.go:131-134` hanya membangun path lewat
+  `PathForModuleGen` tanpa cek keberadaan → sekadar `-I` ke direktori kosong
+
+**Kesimpulan: kernel siap. Tidak ada backport source yang wajib.**
+
+### Sisa pekerjaan kernel
+
+- [x] Commit + push patch pengerasan — `35e50af`, branch `lineage-18.1`
+- [ ] Putuskan nasib `CONFIG_FHANDLE` (AOSP mewajibkan mati, tanpa konsumen) dan
+      `CONFIG_DEBUG_SET_MODULE_RONX` (tidak pernah mendarat) — lihat tabel di atas
+- [ ] `arch/arm/configs/lineageos_a37f_defconfig` **sudah basi** — 4 commit defconfig dari
+      `a12-prep` hanya menyentuh `arch/arm64/`. Karena `TARGET_KERNEL_ARCH := arm64` itu
+      benar, tapi defconfig arm kini tanpa MEMCG/QUOTA/loop-count/disable-LMK.
+      Sinkronkan atau hapus supaya tidak menjebak nanti
+- [ ] Opsional setelah boot: tambah flag `quota` ke `fstab.qcom` — blocker sudah hilang
+      karena kernel kini punya `CONFIG_QUOTA` + `CONFIG_QFMT_V2`
 
 ---
 
@@ -420,6 +507,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Verifikasi Fase 1**: semua 6 commit kernel diverifikasi terhadap source LOS 18.1 (lmkd.cpp, fs_mgr.cpp, first_stage_mount.cpp, apexd_loop.cpp, vendor/lineage/build/soong). Koreksi: first_stage_mount = no-op di 18.1 (DT fstab), CONFIG_QUOTA = direkomendasikan bukan wajib, lmkd fallback vmpressure otomatis tanpa ro.lmk.use_psi. |
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
+| 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
 
 ---
 
