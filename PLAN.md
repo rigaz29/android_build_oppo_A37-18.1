@@ -15,7 +15,7 @@
 | Repo | Branch | Status |
 |---|---|---|
 | `rigaz29/rb_device_oppo_A37` | `lineage-18.1` (dari `rb` 547f8ca + 1 commit port) | ✅ Fase 2 selesai |
-| `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `35e50af` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 2 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
+| `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `meghs-playground/rb-vendor_oppo_A37` | `lineage-17.1` (pin `6a64435`) | ⬜ Perlu branch `lineage-18.1` |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
 | `LineageOS/android_external_stlport` | `lineage-15.1` | ⬜ Cek apakah masih diperlukan |
@@ -76,14 +76,14 @@ Pushed ke: https://github.com/rigaz29/kernel_oppo_msm8939/tree/lineage-18.1
 
 ### Verifikasi kernel vs LOS 18.1 (dari source tree `/root/los18`)
 
-Commit `7a9d4eb` — 4 config, **diuji ulang dengan build nyata; hanya 2 yang benar-benar berefek:**
+Commit `7a9d4eb` — 4 config, **diuji ulang dengan build nyata; hanya 1 yang bertahan:**
 
-| Config | Hasil uji |
-|---|---|
-| `CONFIG_ENCRYPTED_KEYS=y` | ✅ Mendarat di `.config`, efektif |
-| `CONFIG_FHANDLE=y` | ⚠️ Mendarat (+ auto-select `EXPORTFS`), **tapi rasionalnya keliru**. Tidak ada satu pun konsumen `open_by_handle_at`/`name_to_handle_at` di `system/`, `frameworks/` — hanya muncul di header syscall bionic. Dan AOSP justru **mewajibkan mati**: `# CONFIG_FHANDLE is not set` di `kernel/configs/{q,r}/android-4.14/android-base.config`. Pertimbangkan revert |
-| `CONFIG_CRYPTO_SHA256=y` | ⚠️ **Redundan** — sudah `=y` di defconfig asli, di-`select` oleh `drivers/crypto/Kconfig:43`. Harmless |
-| `CONFIG_DEBUG_SET_MODULE_RONX=y` | ❌ **Tidak mendarat.** `arch/arm64/Kconfig.debug:54` → `depends on MODULES`, sedangkan `CONFIG_MODULES is not set` (kernel monolitik). Baris ini dibuang Kconfig tanpa error |
+| Config | Hasil uji | Nasib |
+|---|---|---|
+| `CONFIG_ENCRYPTED_KEYS=y` | ✅ Mendarat di `.config`, efektif | Dipertahankan |
+| `CONFIG_CRYPTO_SHA256=y` | ⚠️ **Redundan** — sudah `=y` di defconfig asli, di-`select` oleh `drivers/crypto/Kconfig:43` | Dibiarkan, harmless |
+| `CONFIG_FHANDLE=y` | ⚠️ Mendarat (+ auto-select `EXPORTFS`), **tapi rasionalnya keliru**. Tidak ada satu pun konsumen `open_by_handle_at`/`name_to_handle_at` di `system/` maupun `frameworks/` — hanya muncul di header syscall bionic. AOSP justru **mewajibkan mati**: `# CONFIG_FHANDLE is not set` di `kernel/configs/{q,r}/android-4.14/android-base.config` | **Di-revert** di `675ae89` |
+| `CONFIG_DEBUG_SET_MODULE_RONX=y` | ❌ **Tidak pernah mendarat.** `arch/arm64/Kconfig.debug:54` → `depends on MODULES`, sedangkan `CONFIG_MODULES is not set` (kernel monolitik). Dibuang Kconfig tanpa error — pola sama dengan bug `CONFIG_STACKPROTECTOR` | **Dihapus** di `675ae89` |
 
 **Tidak perlu backport source code.** Semua gap kernel 3.10 ditangani fallback userspace:
 
@@ -109,7 +109,7 @@ Commit `7a9d4eb` — 4 config, **diuji ulang dengan build nyata; hanya 2 yang be
 Audit penuh terhadap `kernel/configs/r/android-4.14/android-base.config` (250 syarat):
 **187 terpenuhi, 39 absen, 24 beda nilai** sebelum patch di bawah. Tidak ada yang boot-kritis.
 
-### Patch pengerasan defconfig (commit `35e50af`)
+### Patch pengerasan defconfig (commit `35e50af`, disusul `675ae89`)
 
 Diterapkan ke `arch/arm64/configs/lineageos_a37f_defconfig` — **defconfig yang benar-benar
 di-build** (`TARGET_KERNEL_ARCH := arm64`).
@@ -144,7 +144,8 @@ Toolchain persis seperti `vendor/lineage/build/tasks/kernel.mk`: GCC 4.9
 |---|---|---|
 | 1 | defconfig asli @ `fbfa62e` | ✅ Image 16.592.888 B, 4 warning, 0 error |
 | 2 | + patch pengerasan (15 opsi) | ✅ Image 16.729.272 B, 4 warning, 0 error |
-| 3 | + 4 config dari `7a9d4eb` (final) | ✅ Image 16.729.272 B, 4 warning, 0 error |
+| 3 | + 4 config dari `7a9d4eb` | ✅ Image 16.729.272 B, 4 warning, 0 error |
+| 4 | − `FHANDLE` (+`EXPORTFS`) − `DEBUG_SET_MODULE_RONX` (final, `675ae89`) | ✅ Image 16.729.272 B, 4 warning, 0 error |
 
 - `make dtbs` → `msm8916-mtp-15399.dtb` 207.455 B; node `first_stage_mount` / `android,fstab`
   terkonfirmasi ada di dalam DTB hasil kompilasi
@@ -159,8 +160,7 @@ Toolchain persis seperti `vendor/lineage/build/tasks/kernel.mk`: GCC 4.9
 ### Sisa pekerjaan kernel
 
 - [x] Commit + push patch pengerasan — `35e50af`, branch `lineage-18.1`
-- [ ] Putuskan nasib `CONFIG_FHANDLE` (AOSP mewajibkan mati, tanpa konsumen) dan
-      `CONFIG_DEBUG_SET_MODULE_RONX` (tidak pernah mendarat) — lihat tabel di atas
+- [x] `CONFIG_FHANDLE` di-revert + `CONFIG_DEBUG_SET_MODULE_RONX` dihapus — `675ae89`
 - [ ] `arch/arm/configs/lineageos_a37f_defconfig` **sudah basi** — 4 commit defconfig dari
       `a12-prep` hanya menyentuh `arch/arm64/`. Karena `TARGET_KERNEL_ARCH := arm64` itu
       benar, tapi defconfig arm kini tanpa MEMCG/QUOTA/loop-count/disable-LMK.
@@ -508,6 +508,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **Bersih-bersih `7a9d4eb`** (commit `675ae89`, build ke-4 exit 0): `CONFIG_FHANDLE` di-revert — tanpa konsumen di `system/`/`frameworks/` dan AOSP mewajibkannya mati di Q maupun R; ikut menghapus `EXPORTFS` yang di-`select`-nya. `CONFIG_DEBUG_SET_MODULE_RONX` dihapus — tidak pernah mendarat karena `depends on MODULES` sedangkan kernel monolitik. Dari 4 config `7a9d4eb`, tersisa `ENCRYPTED_KEYS` (efektif) dan `CRYPTO_SHA256` (redundan, dibiarkan). |
 
 ---
 
