@@ -1,148 +1,321 @@
-# Rencana — LineageOS 18.1 (Android 11) untuk OPPO A37
+# Rencana Porting LineageOS 18.1 — OPPO A37f (MSM8916)
 
-Status: **rencana, belum dikerjakan.** Ditulis 2 Agustus 2026.
-
-Build kit di `/root/a37-18.1`. Source tree nanti di `/root/los18`.
+> **Status:** Perencanaan
+> **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
+> **Baseline:** LineageOS 17.1 (Android 10) yang sudah terbukti boot sampai homescreen (28 Juli 2026)
+> **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
 
 ---
 
-## Kenapa 18.1, dan kenapa sekarang
+## Sumber Daya
 
-Percobaan 19.1 sebelumnya berhasil menghasilkan ROM yang terbangun, lalu **stuck di logo
-OPPO** dan dihentikan. Sepanjang percobaan itu saya memverifikasi sumber tiga versi
-sekaligus, dan hasilnya menunjuk 18.1 sebagai titik yang jauh lebih murah — bukan tebakan,
-melainkan pembacaan kode:
-
-| Kebutuhan | 18.1 (Android 11) | 19.1 (Android 12) |
+| Repo | Branch Asal | Branch Target |
 |---|---|---|
-| Gerbang eBPF di `bpfloader` | **ada** — `BpfLoader.cpp:83` `if (!isBpfSupported()) return 0;` | dibuang |
-| Penjaga eBPF di `netd` | **ada** — `TrafficController.cpp:252` + 9 titik lain | dibuang; `Controllers.cpp` `sleep(60); exit(1)` |
-| sdcardfs | dipakai (`Utils.cpp:1010`) | dipakai juga |
-| FDE (`encryptable=footer`) | ada (`vold/cryptfs.cpp`) | ada juga |
-| lmkd | `use_inkernel_interface = true`, PSI opsional | sama |
-| `sysfs_disk_stat` | **dideklarasikan** di `system/sepolicy/public/file.te` | dibuang AOSP |
-| `libbfqio` | **ada** di `vendor/lineage` | dibuang |
+| `rigaz29/rb_device_oppo_A37` | `rb` (pin `547f8ca`) | `lineage-18.1` (baru) |
+| `rigaz29/kernel_oppo_msm8939` | `lz4-backport` (pin `70ef81d`) | `lineage-18.1` (baru, dari `lz4-backport` + cherry-pick `a12-prep`) |
+| `meghs-playground/rb-vendor_oppo_A37` | `lineage-17.1` (pin `6a64435`) | `lineage-18.1` (baru) |
+| `LineageOS/android_hardware_sony_timekeep` | `lineage-17.1` | `lineage-18.1` |
+| `LineageOS/android_external_stlport` | `lineage-15.1` | Cek apakah masih diperlukan |
 
-Empat baris pertama itu yang menentukan: di 18.1 **tidak perlu W1 maupun W2 sama sekali**.
-Kernel 3.10 tanpa syscall `bpf` sudah ditangani oleh gerbang bawaan, tanpa fork
-`system/bpf`, tanpa fork `system/netd`, tanpa properti `ro.kernel.ebpf.supported`.
-
-Dua baris terakhir mencoret dua perbaikan lain yang kemarin harus dibuat sendiri.
+Build manifest: `rigaz29/android_build_oppo_A37` → `A37.xml` (update semua revision)
 
 ---
 
-## Yang sudah diverifikasi tersedia
+## Fase 1 — Kernel
 
-Semua dicek 2 Agustus 2026, bukan diasumsikan:
+**Usaha: Kecil** | **Risiko: Rendah** (sudah diverifikasi build-clean di a12-prep)
 
-| Komponen | Sumber | Branch |
-|---|---|---|
-| device tree | `meghs-playground/rb_device_oppo_A37` | `lineage-18.1` (commit terakhir 31 Jan 2024) |
-| vendor | `meghs-playground/rb-vendor_oppo_A37` | `lineage-18.1` — **repo yang sama dengan 17.1**, dan 18.1 adalah branch terbarunya |
-| kernel | `rigaz29/kernel_oppo_msm8939` | `a12-prep` (lihat catatan di bawah) |
-| audio/display/media CAF | `LineageOS/android_hardware_qcom_*` | `lineage-18.1-caf-msm8916` |
-| sepolicy legacy | `LineageOS/android_device_qcom_sepolicy` | `lineage-18.1-legacy` — **repo resmi**, tidak perlu fork LineageOS-UL |
-| timekeep | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` |
-| stlport | `LineageOS/android_external_stlport` | `lineage-15.1` (tidak punya branch 18.1) |
+Branch `a12-prep` punya 4 commit di atas `70ef81d` yang dibuat untuk persiapan LOS 19.1.
+Keempatnya sudah diverifikasi build Image + System.map bersih, tapi **belum pernah di-flash**.
+
+> **Kenapa a12-prep gagal boot Android 12 tapi tetap aman di-cherry-pick untuk 18.1?**
+> Ke-4 commit hanya mengubah defconfig dan perubahannya benar (QUOTA, MEMCG,
+> disable LMK memang wajib untuk Android 11 maupun 12). Yang membuat Android 12
+> gagal boot adalah kernel 3.10 secara arsitektural kekurangan fitur yang Android 12
+> wajibkan: PSI (baru ada di kernel 4.20+), eBPF (untuk network traffic control),
+> cgroup v2 (3.10 hanya punya v1), dan kernel version gate di init yang menolak
+> boot di bawah 4.9. Masalah-masalah itu tidak bisa diperbaiki lewat defconfig.
+> Android 11 **tidak** mensyaratkan PSI, eBPF, atau cgroup v2, sehingga kernel 3.10
+> + 4 commit defconfig sudah cukup untuk LOS 18.1.
+
+- [ ] Buat branch `lineage-18.1` dari `lz4-backport` (70ef81d)
+- [ ] Cherry-pick 4 commit dari `a12-prep`:
+  - [ ] `CONFIG_BLK_DEV_LOOP` — sudah `=y` di base defconfig, kemungkinan no-op
+  - [ ] `CONFIG_QUOTA` — wajib untuk vold quota-based storage accounting
+  - [ ] `CONFIG_MEMCG` — wajib untuk lmkd dan ActivityManager Android 11
+  - [ ] Disable `CONFIG_ANDROID_LOW_MEMORY_KILLER` — ganti ke lmkd userspace
+- [ ] Build Image + DTB, verifikasi tidak ada error
+- [ ] (Opsional) Flash test terpisah sebelum integrasi penuh
+
+**Catatan:** Kernel tetap 3.10.108. Tidak perlu naik ke 4.x — device MSM8916 lain
+(Lenovo A6010, Xiaomi Redmi 2) sudah terbukti boot Android 11 dengan kernel 3.10.
 
 ---
 
-## Beda struktural yang harus ditangani di manifest
+## Fase 2 — Device Tree: File Konfigurasi Utama
 
-**18.1 memakai `hardware/qcom/<komponen>`, bukan `hardware/qcom-caf/<soc>/<komponen>`.**
-Manifest 18.1 sudah menyediakan `hardware/qcom/audio`, `display`, dan `media` tanpa revisi
-eksplisit (ikut default branch). Untuk MSM8916 ketiganya harus diarahkan ke varian CAF, jadi
-polanya **bukan menambah project baru** seperti di 19.1, melainkan `<remove-project>` lalu
-daftarkan ulang dengan branch `lineage-18.1-caf-msm8916`.
+**Usaha: Sedang** | **Risiko: Sedang**
 
-**`device/qcom/sepolicy-legacy` tetap tidak ada di manifest**, padahal `BoardConfig.mk:182`
-meng-include `sepolicy.mk` dari sana. Bedanya dengan 19.1: untuk 18.1 sumbernya ada di repo
-resmi LineageOS, jadi tidak perlu bergantung pada fork pihak ketiga.
+### 2a. `BoardConfig.mk`
+
+- [ ] Tambah `BUILD_BROKEN_ELF_PREBUILTS := true`
+- [ ] Tambah `BOARD_VNDK_VERSION := current`
+- [ ] Hapus `PRODUCT_VENDOR_MOVE_ENABLED := true` (deprecated di 18.1)
+- [ ] Cek path sepolicy: `device/qcom/sepolicy-legacy` → mungkin tidak ada di 18.1.
+  Jika gagal, ganti ke `device/qcom/sepolicy` + set `BOARD_SEPOLICY_VERS`
+- [ ] Tetap pertahankan:
+  - `SELINUX_IGNORE_NEVERALLOWS := true`
+  - `BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive`
+  - `BUILD_BROKEN_PHONY_TARGETS := true`
+  - `BUILD_BROKEN_DUP_RULES := true`
+
+### 2b. `lineage_A37.mk`
+
+- [ ] Tambah `PRODUCT_SHIPPING_API_LEVEL := 19`
+- [ ] Pastikan `product_launched_with_k.mk` masih ada di tree 18.1
+- [ ] Sisanya tidak berubah (PRODUCT_DEVICE, fingerprint, dll.)
+
+### 2c. `AndroidProducts.mk`
+
+- [ ] Cek apakah format masih kompatibel dengan 18.1
+- [ ] Pastikan `PRODUCT_MAKEFILES` dan `COMMON_LUNCH_CHOICES` benar
 
 ---
 
-## Kernel: pakai `a12-prep` apa adanya
+## Fase 3 — Device Tree: HAL & Packages (`device.mk`)
 
-Branch `a12-prep` di `rigaz29/kernel_oppo_msm8939` (5 commit di atas `70ef81d`) dipakai
-langsung. Namanya menyesatkan untuk proyek 18.1, tapi isinya relevan:
+**Usaha: Sedang** | **Risiko: Tinggi** (VINTF mismatch = gagal boot)
 
-| Commit | Untuk 18.1 |
+### Update versi HAL
+
+| HAL | 17.1 | 18.1 | Catatan |
+|---|---|---|---|
+| `android.hardware.health` | 2.0 | **2.1** | Wajib. Hapus impl+service lama, pasang yang baru |
+| `android.hardware.drm` (clearkey) | 1.2 | **1.3** | `android.hardware.drm@1.3-service.clearkey` |
+| `android.hardware.bluetooth.audio` | — | **2.0** | Baru di Android 11. Tambah `@2.0-impl` |
+| `android.hardware.authsecret` | — | **1.0** | Baru. Tambah `@1.0-service` |
+| `android.hardware.fastboot` | — | **1.0** | Tambah `fastbootd` + `@1.0-impl-mock` |
+
+### Hapus / ganti
+
+- [ ] `android.hardware.wifi@1.0-service.legacy` → `android.hardware.wifi@1.0-service`
+- [ ] Hapus `InProcessNetworkStack` (tidak ada di 18.1)
+- [ ] Hapus `PRODUCT_DISABLE_SCUDO := true` (flag tidak ada lagi)
+- [ ] Cek `android.hardware.usb@1.0-service.cyanogen_8916` — jika tidak ada di 18.1,
+  ganti ke `android.hardware.usb@1.0-service`
+- [ ] ConfigStore: jangan pasang `android.hardware.configstore@1.1-service` (deprecated)
+
+### Tambah
+
+- [ ] `vndservicemanager`
+- [ ] `android.hardware.bluetooth.audio@2.0-impl`
+- [ ] `android.hardware.authsecret@1.0-service`
+- [ ] `fastbootd` + `android.hardware.fastboot@1.0-impl-mock`
+
+### Properti
+
+- [ ] Tambah `ro.control_privapp_permissions=enforce`
+- [ ] Tambah `ro.telephony.iwlan_operation_mode=legacy`
+- [ ] Cek semua `PRODUCT_PROPERTY_OVERRIDES` — yang vendor-specific sebaiknya
+  pindah ke `PRODUCT_VENDOR_PROPERTIES` (deprecated tapi masih jalan di 18.1)
+- [ ] VNDK: `libbase-v28.so` → `libbase-v30.so` (path prebuilts/vndk/v30/)
+
+---
+
+## Fase 4 — VINTF Manifest (`manifest.xml`)
+
+**Usaha: Sedang** | **Risiko: Tinggi** (harus sinkron dengan device.mk)
+
+### Update versi
+
+```
+android.hardware.audio:            5.0 → 6.0
+android.hardware.audio.effect:     5.0 → 6.0
+android.hardware.bluetooth:        1.0 → 1.1
+android.hardware.health:           2.0 → 2.1
+android.hardware.wifi:             1.3 → 1.4
+android.hardware.wifi.hostapd:     1.1 → 1.2
+android.hardware.wifi.supplicant:  1.2 → 1.3
+android.hardware.gnss:             1.0 → 2.0 (atau tetap 1.0, tambah 2.0)
+android.hardware.drm:              tambah fqname @1.3
+```
+
+### Tambah entri baru
+
+```xml
+android.hardware.bluetooth.audio@2.0
+android.hardware.authsecret@1.0
+android.hardware.fastboot@1.0
+```
+
+### Hapus
+
+```xml
+android.hardware.configstore   <!-- deprecated di Android 11 -->
+```
+
+### Aturan sinkronisasi
+
+> Setiap `<hal>` di manifest.xml HARUS punya pasangan di `PRODUCT_PACKAGES` (device.mk).
+> Jika manifest mendeklarasikan `audio@6.0` tapi yang di-build `audio@5.0-impl`,
+> VINTF check gagal → device tidak boot.
+
+---
+
+## Fase 5 — SEPolicy
+
+**Usaha: Besar** | **Risiko: Sedang** (permissive dulu, enforce nanti)
+
+Android 11 menambah banyak domain, type, dan neverallow rule baru.
+
+### File baru yang perlu dibuat
+
+- [ ] `hal_authsecret_default.te`
+- [ ] `hal_bluetooth_audio_default.te`
+- [ ] `hal_health_2_1.te` (atau update `hal_health_default.te`)
+- [ ] `hal_fastboot_default.te`
+
+### File yang perlu di-update
+
+- [ ] `vendor_init.te` — banyak type/attribute baru
+- [ ] `init.te` — domain baru untuk service Android 11
+- [ ] `system_server.te` — permission baru
+- [ ] `vold.te` — quota, metadata partition
+- [ ] `file_contexts` — path binary HAL baru
+- [ ] `property_contexts` — properti baru Android 11
+- [ ] `genfs_contexts` — filesystem type baru
+- [ ] `seapp_contexts` — cek format baru
+
+### Strategi
+
+1. Boot dengan `androidboot.selinux=permissive` + `SELINUX_IGNORE_NEVERALLOWS := true`
+2. Kumpulkan `avc: denied` dari `dmesg` / `logcat`
+3. Perbaiki bertahap, domain per domain
+4. Target akhir: `enforcing` (tapi ini bisa menyusul setelah semua fitur jalan)
+
+---
+
+## Fase 6 — Vendor Blobs (`vendor/oppo`)
+
+**Usaha: Sedang** | **Risiko: Sedang**
+
+- [ ] Fork branch `lineage-17.1` → `lineage-18.1`
+- [ ] Update `A37-vendor.mk`:
+  - [ ] Path `$(TARGET_COPY_OUT_SYSTEM)/etc/` → `$(TARGET_COPY_OUT_VENDOR)/etc/`
+    untuk file yang seharusnya di partisi vendor
+  - [ ] `libbase-v28.so` → `libbase-v30.so`
+- [ ] Cek prebuilt HIDL services terhadap library yang berubah:
+  - [ ] `perf@1.0-service`
+  - [ ] `iop@1.0/2.0`
+  - [ ] `bluetooth@1.0-service-qti`
+  - [ ] `time_daemon`
+  - [ ] DRM Widevine blob (mungkin perlu update untuk `drm@1.3`)
+- [ ] Verifikasi semua 328 file di `proprietary-files.txt` masih ada dan benar path-nya
+
+---
+
+## Fase 7 — Init Scripts & Rootdir
+
+**Usaha: Sedang** | **Risiko: Sedang**
+
+- [ ] `fstab.qcom`:
+  - [ ] Cek flag `fileencryption=` / `encryptable=`
+  - [ ] Tambah entri `metadata` partition jika diperlukan
+- [ ] `init.target.rc` / `init.qcom.rc`:
+  - [ ] Android 11 lebih ketat: `mkdir`, `chown`, `chmod` harus di phase yang benar
+  - [ ] Service baru perlu `seclabel` yang sesuai
+  - [ ] Cek trigger `on property:` yang berubah
+- [ ] `ueventd.qcom.rc`:
+  - [ ] Permission node device mungkin perlu update
+- [ ] `init.recovery.qcom.rc`:
+  - [ ] Cek kompatibilitas dengan recovery 18.1
+
+---
+
+## Fase 8 — Build Manifest (`A37.xml`)
+
+**Usaha: Kecil** | **Risiko: Rendah**
+
+- [ ] Update semua `revision` ke branch `lineage-18.1`
+- [ ] `hardware/sony/timekeep` → `lineage-18.1`
+- [ ] Cek apakah `external/stlport` masih diperlukan (kemungkinan tidak)
+- [ ] Tambah `device/qcom/sepolicy` jika roomservice tidak otomatis ambil
+- [ ] Repo init: `repo init -u https://github.com/LineageOS/android.git -b lineage-18.1`
+
+---
+
+## Fase 9 — Build & Debug Pertama
+
+**Strategi: boot dulu, fitur menyusul**
+
+1. [ ] `repo sync` dengan manifest baru
+2. [ ] `source build/envsetup.sh && breakfast lineage_A37-userdebug`
+3. [ ] `mka bacon` — perbaiki error kompilasi satu per satu
+4. [ ] Flash, target: **boot sampai homescreen**
+5. [ ] Kumpulkan log: `logcat -b all`, `dmesg`, `cat /proc/last_kmsg`
+6. [ ] Identifikasi HAL yang gagal register → perbaiki manifest.xml / device.mk
+7. [ ] Iterasi sampai stabil
+
+### Masalah umum yang diantisipasi
+
+| Gejala | Kemungkinan Penyebab |
 |---|---|
-| `BLK_DEV_LOOP_MIN_COUNT` 8 → 32 | **wajib** — Android 11 juga memasang banyak APEX, dan default 8 membuat `apexd` gagal |
-| `CONFIG_QUOTA` + `QFMT_V2` | berguna (statistik penyimpanan installd) |
-| `CONFIG_MEMCG` | berguna, tidak wajib |
-| matikan LMK in-kernel | **opsional** — lmkd A11 masih mendukung antarmuka in-kernel (`use_inkernel_interface = true`) |
-| `Makefile` `mkdir -p` output soong | **wajib** — soong menghapus direktori `gen` lalu memanggil `make O=<gen>`; kernel 3.10 tidak membuatnya sendiri |
-
-Kalau nanti perlu memisahkan, commit LMK adalah satu-satunya yang bisa dilepas tanpa
-konsekuensi build (`49766c1` = tanpa dia).
-
----
-
-## Cacat device tree: enam gugur, dua tersisa
-
-Delapan cacat yang kemarin menghalangi build 19.1 sudah saya periksa langsung ke tree 18.1:
-
-| Cacat 19.1 | Di 18.1 |
-|---|---|
-| `libshims_ril` kembar `.mk`/`.bp` | **tidak ada** |
-| `init.recovery.qcom.rc` kembar | **tidak ada** (hanya satu definisi) |
-| `libbfqio` hilang | **tidak berlaku** — masih ada di `vendor/lineage` 18.1 |
-| `sysfs_disk_stat` tidak terdeklarasi | **tidak berlaku** — masih ada di `system/sepolicy` |
-| spesifikasi gatekeeper kembar | **tidak ada** di `sepolicy/private/` |
-| kernel tidak membuat direktori output | **berlaku** — sudah tertangani di `a12-prep` |
-| `power_profile.xml` diawali `0x0a` | **ADA** — perbaikannya satu byte |
-| properti bentrok nilai | **ADA** — 3 pasang (19.1 punya 4) |
-
-Jadi tree 18.1 memang lebih sering dilalui orang. Dua yang tersisa sudah diketahui bentuk
-perbaikannya persis, jadi bukan lagi penemuan melainkan penerapan.
+| Bootloop di logo | VINTF mismatch (manifest.xml vs device.mk) |
+| Crash di `system_server` | Properti hilang / salah, sepolicy terlalu ketat |
+| Wi-Fi tidak jalan | `wifi@1.0-service` (bukan `.legacy`) perlu config berbeda |
+| Audio mati | `audio@6.0` butuh `audio_policy_configuration.xml` format baru |
+| Kamera crash | Blob HAL1 vs framework Android 11 — cek `camera.provider@2.4` |
+| SIM tidak terdeteksi | RIL blob vs `radio@1.0` — mungkin perlu update manifest |
+| Bluetooth gagal | `bluetooth@1.1` vs prebuilt `bluetooth@1.0-service-qti` |
 
 ---
 
-## Perbedaan pendekatan dari percobaan 19.1
+## Urutan Pengerjaan
 
-Kemarin kelima belas commit `rb` ditumpuk ke basis 19.1 **sebelum** build pertama. Akibatnya
-ketika ROM stuck di logo, tersangkanya ada dua puluh sekaligus dan tidak ada titik pijak.
-
-Kali ini dibalik:
-
-1. **Bangun sestok dulu** — device tree 18.1 apa adanya, hanya dengan dua perbaikan yang
-   memang menghalangi build. Flash. Cari tahu apakah boot.
-2. **Baru port perbaikan `rb`** satu per satu di atas basis yang sudah terbukti boot.
-
-Kalau boot pertama gagal, tersangkanya sedikit dan lognya bermakna. Kalau berhasil, tiap
-commit `rb` yang ditambahkan punya baseline untuk dibandingkan.
-
----
-
-## Langkah
-
-1. **Siapkan build kit** di `/root/a37-18.1`: `A37.xml` (manifest 18.1 sesuai tabel di atas),
-   dan `build.sh` diadaptasi dari `/root/a37/build.sh` (`BRANCH="lineage-18.1"`).
-2. `repo init -b lineage-18.1 --git-lfs` ke `/root/los18`, pasang local manifest, `repo sync`.
-   Disk bebas 278 GB — cukup, tidak perlu `--reference` maupun menghapus apa pun.
-3. `lunch lineage_A37-eng`. Kalau gagal, perbaiki dan catat — pola kegagalannya sudah
-   dikenali dari 19.1.
-4. `m bacon`. Dua cacat yang diperkirakan (`power_profile.xml`, properti bentrok) diperbaiki
-   saat muncul, di fork `rigaz29/rb_device_oppo_A37` branch baru untuk 18.1.
-5. Flash. **Backup `boot.img` yang terpasang lebih dulu** — ROM 17.1 di `/root/a37-dl`
-   adalah jalan pulang.
-6. Kalau stuck: boot ke recovery 18.1 (kernelnya sama persis dengan `boot.img`, jadi langsung
-   memisahkan kernel dari userspace), lalu ambil ramoops lewat reboot hangat
-   (`/sys/fs/pstore/console-ramoops-0`). Kernel sudah punya `CONFIG_PSTORE_RAM` dan cmdline
-   membawa `ramoops.mem_address=0x9ff00000`.
+```
+Fase 1 (Kernel)
+    │
+    ▼
+Fase 2 (BoardConfig, lineage_A37.mk)
+    │
+    ▼
+Fase 3 (device.mk — HAL & packages)  ◄──┐
+    │                                    │
+    ▼                                    │ iterasi
+Fase 4 (manifest.xml — VINTF)  ◄────────┘
+    │
+    ▼
+Fase 8 (A37.xml) → repo sync → BUILD PERTAMA
+    │
+    ▼
+Fase 9 (debug boot)
+    │
+    ├──► Fase 5 (SEPolicy) — paralel dengan debug
+    ├──► Fase 6 (Vendor blobs) — jika ada blob crash
+    └──► Fase 7 (Init scripts) — jika ada masalah mount/init
+```
 
 ---
 
-## Yang tetap tidak dijanjikan
+## Yang TIDAK Berubah
 
-Verifikasi di atas semuanya soal **sumber**, bukan perangkat. Yang terbukti: 18.1 tidak
-menuntut eBPF, komponennya tersedia, dan tree-nya lebih bersih. Yang **tidak** terbukti:
-bahwa ROM-nya akan boot di A37.
+Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi:
 
-19.1 juga "seharusnya bisa" sampai ia stuck di logo. Bedanya sekarang: empat blocker yang
-kemarin harus ditambal sendiri memang tidak ada di jalur ini, dan kalau gagal, rencana
-diagnosisnya sudah disiapkan di langkah 6 — bukan dipikirkan setelah gagal.
+- Arsitektur: tetap 32-bit (`TARGET_ARCH := arm`, `cortex-a53`)
+- `TARGET_USES_64_BIT_BINDER := true`
+- Kernel base/tags/ramdisk offset
+- Display: gralloc, hwcomposer, memtrack (versi HAL tetap)
+- Camera HAL1 legacy path
+- Power HAL `power@1.0` (masih diterima di 18.1)
+- Sensors `@1.0` passthrough
+- Vibrator `@1.0`
+- Keymaster `@3.0`
+- `ro.product.first_api_level=19`
+- Dalvik VM tuning (heapgrowthlimit 192m, dll.)
+- LZ4 zram compression
+- Interactive governor tuning
+- Double-tap-to-wake (Synaptics OPPO driver)
 
-Perkiraan yang jujur: sampai ROM terbangun kemungkinan besar lancar. Boot pertama tetap
-lemparan dadu, sama seperti kemarin.
+---
+
+*Dokumen ini hidup — update status checkbox seiring progress.*
