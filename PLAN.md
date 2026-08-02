@@ -3,7 +3,7 @@
 > **Status:** Fase 1–2 selesai, terverifikasi & lolos tes build (`lunch` + `m nothing` + `m dtimage`).
 > Fase 3–4 diverifikasi & lolos `m check-vintf-all` (COMPATIBLE); konfigurasinya ikut
 > lolos parse penuh, tapi belum divalidasi compile penuh. Fase 5 diverifikasi & diperbaiki.
-> Fase 6 diverifikasi & diperbaiki. Fase 7–9 belum dikerjakan.
+> Fase 6–7 diverifikasi & diperbaiki. Fase 8–9 belum dikerjakan.
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -16,7 +16,7 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `3c9651b` (port + fix build/VINTF/sepolicy/blob) | ✅ Fase 2–6 lolos `m nothing` + `checkvintf` + `selinux_policy` |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `c8dc9ab` (port + fix build/VINTF/sepolicy/blob/init) | ✅ Fase 2–7 lolos `m nothing` + `checkvintf` + `selinux_policy` + `host_init_verifier` |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `rigaz29/rb-vendor_oppo_A37` | `lineage-18.1` @ `8349a48` (repo baru, dari `6a64435` + fix Fase 6) | ✅ Fase 6 selesai |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
@@ -654,8 +654,77 @@ Sebelumnya `vendor/oppo/A37` menunjuk `meghs-playground/rb-vendor_oppo_A37` (buk
   - [ ] Cek trigger `on property:` yang berubah
 - [ ] `ueventd.qcom.rc`:
   - [ ] Android R mewajibkan naming vendor (`ueventd.qcom.rc`, bukan `ueventd.rc`)
-- [ ] `init.recovery.qcom.rc`:
-  - [ ] Cek kompatibilitas dengan recovery 18.1
+- [x] `init.recovery.qcom.rc`:
+  - [x] Cek kompatibilitas dengan recovery 18.1
+
+### Verifikasi & tes Fase 7 (2 Agu 2026, commit `c8dc9ab`)
+
+**Tes utama: `host_init_verifier`** — validator init bawaan Android 11. Ia otomatis
+dijalankan untuk modul yang nama file terpasangnya cocok pola `init%rc`
+(`build/make/core/misc_prebuilt_internal.mk:27`), jadi keenam `init*.rc` device ini
+memang diperiksa saat build. Ditambah `m nothing` ✅ · `m selinux_policy` ✅ ·
+`m check-vintf-all` → `COMPATIBLE` ✅.
+
+#### 2 bug ditemukan & diperbaiki
+
+**`load_system_props` → build gagal.**
+
+```
+host_init_verifier: Command 'load_system_props' (init.target.rc:102) failed:
+  'load_system_props' is deprecated
+```
+
+Dihapus. Aman: di runtime pun sudah no-op — `do_load_system_props`
+(`system/core/init/builtins.cpp:1084`) hanya mencatat log lalu `return`.
+
+**`/firmware` tidak pernah berlabel `firmware_file`.** vfat tidak mendukung xattr, jadi
+labelnya dari genfscon, dan platform menyetel `genfscon vfat / u:object_r:vfat:s0`
+(`system/sepolicy/private/genfs_contexts:315`) → seluruh isi `/firmware` berlabel `vfat`.
+Padahal policy device memberi izin terhadap **`firmware_file`**: `vendor_init.te:1,7`,
+`keystore.te:3,4`, `mediacodec.te:2`, `priv_app.te:16`, plus `hal_drm`/`esepmdaemon` di
+`sepolicy-legacy`. Aturan itu tidak pernah cocok → baca firmware modem/DRM ditolak saat
+enforcing. Ditambahkan `context=u:object_r:firmware_file:s0` ke opsi mount, sama seperti
+ROM 18.1 A37 yang beredar.
+
+#### Terverifikasi benar (tidak diubah)
+
+| Item | Bukti |
+|---|---|
+| 8 modul rootdir semuanya di `PRODUCT_PACKAGES` | dicek satu per satu |
+| init mengimpor `/vendor/etc/init/hw/init.${ro.hardware}.rc` | `system/core/rootdir/init.rc:10` — cocok dengan `LOCAL_MODULE_PATH` |
+| 4 baris `import` di `init.qcom.rc` cocok path terpasang | dibandingkan dengan isi `out/.../init/hw/` |
+| `ueventd` di `/vendor/ueventd.rc` | salah satu path yang dibaca `ueventd.cpp:291`. **Klaim rencana keliru** — yang berubah di 18.1 adalah nama *modul*, bukan nama file terpasang |
+| `init.recovery.qcom.rc` di `/` | `bootable/recovery/etc/init.rc:1` → `import /init.recovery.${ro.hardware}.rc` |
+| `mount_all` + `swapon_all` → `/vendor/etc/fstab.qcom` | cocok urutan cari `fs_mgr_fstab.cpp:416` |
+| 16 service di rc menunjuk biner yang benar-benar terpasang | dicek terhadap ninja graph + blob vendor |
+
+#### Tidak berlaku untuk device ini
+
+- **Partisi `metadata`** — hanya untuk FBE/metadata encryption. A37 pakai FDE
+  (`encryptable=footer`), konsisten dengan kernel tanpa `FS_ENCRYPTION`
+- **Salin fstab ke ramdisk** — first-stage mount lewat DT fstab, sudah terkonfirmasi ada
+  di dalam DTB hasil kompilasi (lihat Fase 1)
+
+#### Catatan metodologi
+
+Cek label SELinux service sempat melaporkan 15 dari 16 service "tanpa domain". Itu
+**false positive**: matcher menganggap aturan luas `plat_file_contexts:79`
+(`/system(/.*)?` → `system_file`) menang atas entri spesifik. Diverifikasi dengan membaca
+xattr `security.selinux` asli dari image ROM referensi:
+`/vendor/bin/rmt_storage` → `rmt_storage_exec`, `qseecomd` → `tee_exec`,
+`rild` → `rild_exec`. Entri spesifik memang menang; tidak ada bug.
+
+> Konsekuensinya untuk Fase 5: label fallback `drm@1.3-service.clearkey` sebelum ditambal
+> sebenarnya `system_file`, bukan `vendor_file` seperti tertulis di sana. Temuan dan
+> perbaikannya tetap benar — binernya memang tidak punya entri spesifik di mana pun
+> sehingga init tidak bisa transisi ke domain `hal_drm_default`.
+
+#### Perbandingan dengan ROM 18.1 A37 yang beredar
+
+Layout init identik (5 rc di `/vendor/etc/init/hw/`). Perbedaan fstab yang belum diadopsi,
+bukan bug tapi layak dipertimbangkan setelah boot: `reservedsize=128M` dan `latemount`
+pada `/data`, serta `journal_async_commit`. Sebaliknya ROM itu **tidak** punya
+`/vendor/ueventd.rc` sama sekali — device tree ini lebih lengkap di sisi itu.
 
 ---
 
@@ -763,6 +832,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **Fase 7 dikerjakan & diuji** (commit `c8dc9ab`) memakai `host_init_verifier`, validator init bawaan Android 11. Dua bug: `load_system_props` deprecated bikin build gagal (dihapus; di runtime pun sudah no-op), dan `/firmware` tidak pernah berlabel `firmware_file` karena vfat tanpa xattr jatuh ke `genfscon vfat -> vfat` sementara policy device memberi izin ke `firmware_file` — ditambahkan opsi mount `context=`. Terverifikasi benar: import path, `ueventd` di `/vendor/ueventd.rc`, `init.recovery.qcom.rc` di `/`, `mount_all`/`swapon_all`, dan 16 service menunjuk biner yang ada. Klaim rencana soal penamaan `ueventd.qcom.rc` dikoreksi: yang berubah nama modul, bukan file terpasang. Cek label service sempat false-positive; dikoreksi dengan membaca xattr asli dari image ROM referensi. |
 | 2 Agu 2026 | **Fase 6 dikerjakan & diuji** (device `3c9651b`, vendor `8349a48`): analisis `DT_NEEDED` atas 302 blob ELF menemukan 6 library hilang; `libthermalclient.so` diambil dari ROM 18.1 A37 yang beredar (rantai `libqti-perfd-client` → `libqti-perfd` → `libthermalclient`), 5 sisanya juga absen di ROM referensi. Dua bug daftar blob: `libmmcamera_tuning.so` ada di repo tapi tak pernah dipasang padahal di-`dlopen` `libmm-qcamera`/`liboemcamera`, dan `sensors.a6000.so` sisa port Lenovo A6000 disalin ke direktori salah. Hasil: 338 terdaftar = 338 di disk. Duplicate rule `libmm-omxcore` ditelusuri sampai tuntas (blob yang menang; menghapus dari PRODUCT_PACKAGES tidak menolong karena ditarik lewat dependensi) lalu didokumentasikan, bukan diubah. Repo vendor sendiri dibuat: `rigaz29/rb-vendor_oppo_A37`. |
 | 2 Agu 2026 | **Fase 5 diverifikasi & diuji** (commit `e9d1daf`): cek coverage otomatis menemukan `drm@1.3-service.clearkey` tanpa entri `file_contexts` — AOSP hanya melabeli `drm@1.0-service`/`-lazy`, dan `.rc`-nya tak menyetel `seclabel`, jadi binernya berlabel `vendor_file` dan servis DRM jalan di domain `init`. Ditambal → 18/18 HAL service berlabel. Diukur juga alasan sebenarnya `SELINUX_IGNORE_NEVERALLOWS` masih wajib: ~1.500 pelanggaran, 626 dari `property.te` platform dan ratusan dari `sepolicy-legacy` QCOM, hanya 8 milik A37 (`timekeep_app.te:7`). Dicatat dua jebakan pengukuran: override flag harus SETELAH `include sepolicy-legacy` (yang memaksa `:= true`), dan artefak `sepolicy_neverallows` harus dihapus dulu karena `m selinux_policy` tidak membangunnya. |
 | 2 Agu 2026 | **Fase 3–4 diverifikasi & diuji** (commit `8276fea`): `m check-vintf-all` awalnya **gagal total** — `vendor.lineage.trust` dideklarasikan di `manifest.xml` sekaligus dibawa VINTF fragment paketnya, dan `HalManifest::shouldAdd` menolaknya sehingga **seluruh device manifest batal** ("No device HAL manifest"). Entri manual dihapus → **COMPATIBLE**. Diklarifikasi kenapa drm tidak ikut bentrok: fragment clearkey tanpa tag `<version>`. Improve: `IDisplayColorCalibration` + `IAdaptiveBacklight` ditambahkan ke livedisplay (paketnya tak bawa fragment; tanpa deklarasi `getService()` langsung null karena `PRODUCT_ENFORCE_VINTF_MANIFEST`), dipilih hanya yang terbukti register lewat node sysfs kernel A37. Cross-check: semua 26 `<hal>` punya penyedia. |
