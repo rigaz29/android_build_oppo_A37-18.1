@@ -2,7 +2,8 @@
 
 > **Status:** Fase 1–2 selesai, terverifikasi & lolos tes build (`lunch` + `m nothing` + `m dtimage`).
 > Fase 3–4 diverifikasi & lolos `m check-vintf-all` (COMPATIBLE); konfigurasinya ikut
-> lolos parse penuh, tapi belum divalidasi compile penuh. Fase 5–9 belum dikerjakan.
+> lolos parse penuh, tapi belum divalidasi compile penuh. Fase 5 diverifikasi & diperbaiki.
+> Fase 6–9 belum dikerjakan.
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -15,7 +16,7 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `8276fea` (dari `rb` 547f8ca + port + fix build + fix VINTF) | ✅ Fase 2–4 lolos `m nothing` + `checkvintf` |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `e9d1daf` (port + fix build + fix VINTF + fix sepolicy) | ✅ Fase 2–5 lolos `m nothing` + `checkvintf` + `selinux_policy` |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `meghs-playground/rb-vendor_oppo_A37` | `lineage-17.1` (pin `6a64435`) | ⬜ Perlu branch `lineage-18.1` |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
@@ -496,6 +497,65 @@ repo `LineageOS/android_device_qcom_sepolicy` branch `lineage-18.1-legacy`
 3. Perbaiki bertahap, domain per domain
 4. Target akhir: `enforcing` (menyusul setelah semua fitur jalan)
 
+### Verifikasi & tes Fase 5 (2 Agu 2026, commit `e9d1daf`)
+
+**Tes:** `m selinux_policy` ✅ · `m sepolicy_neverallows` ✅ · `m nothing` ✅ ·
+`m check-vintf-all` → `COMPATIBLE` ✅
+
+#### BUG: `drm@1.3-service.clearkey` tanpa label file_contexts
+
+Cek coverage otomatis atas **18 HAL service** yang dideklarasikan `device.mk` menemukan
+satu biner tanpa entri. AOSP `system/sepolicy/vendor/file_contexts:25-26` hanya melabeli
+`drm@1.0-service` dan `-lazy`, sedangkan `device.mk:104` memasang `@1.3-service.clearkey`.
+Init `.rc` bawaannya juga **tidak** menyetel `seclabel`, jadi init sepenuhnya bergantung
+pada label file. Tanpa entri, biner berlabel `vendor_file` → init gagal transisi domain →
+servis DRM jalan di domain `init`.
+
+Ditambal dengan `hal_drm_default_exec`. **Sesudah: 18/18 berlabel.**
+
+#### Kenapa `SELINUX_IGNORE_NEVERALLOWS` tetap wajib (dengan angka)
+
+Komentar lama menyebut alasannya "file_contexts belum lengkap" — itu tidak lagi benar,
+tapi flag-nya tetap perlu karena alasan lain. Diukur dengan `m sepolicy_neverallows`:
+
+| Sumber pelanggaran | Jumlah |
+|---|---|
+| `system/sepolicy/public/property.te` | 626 |
+| domain aplikasi (`priv_app`, `untrusted_app`, `radio`, `platform_app`, `system_app`, …) | 46 masing-masing |
+| `device/qcom/sepolicy-legacy/**` | ratusan |
+| **`device/oppo/A37/sepolicy/timekeep_app.te:7`** (`app_domain(timekeep_app)`) | **8** |
+| **Total** | **~1.500** |
+
+Artinya hampir semua pelanggaran berasal dari sepolicy legacy QCOM + platform, **di luar
+kendali device tree ini**. Hanya 8 yang milik A37 sendiri. Target `enforcing` realistis
+hanya jika `sepolicy-legacy` ditinggalkan — bukan sekadar menambal `.te` device.
+
+> ⚠️ **Jebakan pengukuran:** `device/qcom/sepolicy-legacy/sepolicy.mk:11` menyetel
+> `SELINUX_IGNORE_NEVERALLOWS := true` **tanpa syarat**. Override apa pun yang ditulis
+> *sebelum* baris `include`-nya di BoardConfig akan ditimpa, sehingga pengukuran tampak
+> "lolos" padahal cek-nya tidak pernah berjalan. Override harus **setelah** include.
+> Selain itu `m selinux_policy` **tidak** membangun modul `sepolicy_neverallows` — dan
+> modul itu di-cache, jadi artefaknya (`out/target/product/A37/fake_packages/
+> sepolicy_neverallows`) harus dihapus dulu agar cek benar-benar dijalankan.
+
+#### Terverifikasi sudah benar (tidak perlu diubah)
+
+- `file.te` / `property.te` mendeklarasikan `proc_touchpanel` dan `vendor_timekeep_prop`
+  yang dipakai `genfs_contexts` / `property_contexts` — policy compile bersih
+- Biner `livedisplay@2.0-service-{legacymm,sysfs}` **sudah** berlabel lewat
+  `device/lineage/sepolicy/{qcom,common}/vendor/file_contexts`
+- `IAdaptiveBacklight` + `IDisplayColorCalibration` (ditambahkan di Fase 4) sudah punya
+  entri `hwservice_contexts` dari sepolicy LineageOS — jadi perubahan Fase 4 aman
+- Entri `usb@1.0-service.cyanogen_8916` memakai bentuk `/system/vendor/...` tanpa
+  alternasi; sah untuk layout `PRODUCT_VENDOR_MOVE_ENABLED` device ini, hanya tidak seragam
+
+#### Catatan untuk fase enforcing
+
+22 properti yang di-set `device.mk` belum punya `property_contexts` (mis. `ro.usb.id.*`,
+`persist.hwc.*`, `rild.libpath`, `ro.sys.sdcardfs`). Semuanya properti **build-time** di
+`build.prop`, bukan ditulis runtime, jadi bukan blocker boot — tapi akan jadi `avc: denied`
+terhadap `default_prop` saat enforcing.
+
 ---
 
 ## Fase 6 — Vendor Blobs (`vendor/oppo`)
@@ -641,6 +701,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **Fase 5 diverifikasi & diuji** (commit `e9d1daf`): cek coverage otomatis menemukan `drm@1.3-service.clearkey` tanpa entri `file_contexts` — AOSP hanya melabeli `drm@1.0-service`/`-lazy`, dan `.rc`-nya tak menyetel `seclabel`, jadi binernya berlabel `vendor_file` dan servis DRM jalan di domain `init`. Ditambal → 18/18 HAL service berlabel. Diukur juga alasan sebenarnya `SELINUX_IGNORE_NEVERALLOWS` masih wajib: ~1.500 pelanggaran, 626 dari `property.te` platform dan ratusan dari `sepolicy-legacy` QCOM, hanya 8 milik A37 (`timekeep_app.te:7`). Dicatat dua jebakan pengukuran: override flag harus SETELAH `include sepolicy-legacy` (yang memaksa `:= true`), dan artefak `sepolicy_neverallows` harus dihapus dulu karena `m selinux_policy` tidak membangunnya. |
 | 2 Agu 2026 | **Fase 3–4 diverifikasi & diuji** (commit `8276fea`): `m check-vintf-all` awalnya **gagal total** — `vendor.lineage.trust` dideklarasikan di `manifest.xml` sekaligus dibawa VINTF fragment paketnya, dan `HalManifest::shouldAdd` menolaknya sehingga **seluruh device manifest batal** ("No device HAL manifest"). Entri manual dihapus → **COMPATIBLE**. Diklarifikasi kenapa drm tidak ikut bentrok: fragment clearkey tanpa tag `<version>`. Improve: `IDisplayColorCalibration` + `IAdaptiveBacklight` ditambahkan ke livedisplay (paketnya tak bawa fragment; tanpa deklarasi `getService()` langsung null karena `PRODUCT_ENFORCE_VINTF_MANIFEST`), dipilih hanya yang terbukti register lewat node sysfs kernel A37. Cross-check: semua 26 `<hal>` punya penyedia. |
 | 2 Agu 2026 | **Fase 2 diverifikasi & diuji build**: `lunch` + `m nothing` (soong + kati ±20.700 makefile) + `m dtbToolOppo dtimage` semuanya lolos; dt.img 210.944 B dengan `oppoId: 15399` terisi, dan kernel yang dibangun build system memuat patch Fase 1. Tiga blocker Android 11 diperbaiki: `BUILD_BROKEN_PHONY_TARGETS` obsolete (dihapus), `libhidltransport`/`libhwbinder` visibility di `usb`+`lights` Android.bp (dihapus dari shared_libs), `BUILD_HOST_EXECUTABLE` obsolete di dtbtool (dikonversi ke `cc_binary_host`). Escape hatch `BUILD_BROKEN_USES_BUILD_COPY_HEADERS` dipakai untuk stack GPS. Koreksi: `TARGET_USES_LEGACY_WFD` ternyata tanpa konsumen. Temuan untuk fase lain: duplicate rule `libmm-omxcore.so` (device.mk vs A37-vendor.mk), `external/stlport` tidak diperlukan, `dtbtool.c` A37 kehilangan `O_TRUNC`. |
 | 2 Agu 2026 | **Bersih-bersih `7a9d4eb`** (commit `675ae89`, build ke-4 exit 0): `CONFIG_FHANDLE` di-revert — tanpa konsumen di `system/`/`frameworks/` dan AOSP mewajibkannya mati di Q maupun R; ikut menghapus `EXPORTFS` yang di-`select`-nya. `CONFIG_DEBUG_SET_MODULE_RONX` dihapus — tidak pernah mendarat karena `depends on MODULES` sedangkan kernel monolitik. Dari 4 config `7a9d4eb`, tersisa `ENCRYPTED_KEYS` (efektif) dan `CRYPTO_SHA256` (redundan, dibiarkan). |
