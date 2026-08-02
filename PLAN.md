@@ -60,6 +60,27 @@ Branch `lineage-18.1` dibuat dari `lz4-backport` (70ef81d) + cherry-pick **6 com
 
 Pushed ke: https://github.com/rigaz29/kernel_oppo_msm8939/tree/lineage-18.1
 
+### Verifikasi kernel vs LOS 18.1 (dari source tree `/root/los18`)
+
+Commit tambahan: `7a9d4eb` — 4 config baru dari verifikasi:
+- [x] `CONFIG_FHANDLE=y` — tidak default y, untuk open_by_handle_at (vold)
+- [x] `CONFIG_ENCRYPTED_KEYS=y` — untuk keymaster
+- [x] `CONFIG_CRYPTO_SHA256=y` — SHA2_ARM64_CE tidak auto-select ini
+- [x] `CONFIG_DEBUG_SET_MODULE_RONX=y` — security hardening
+
+**Tidak perlu backport source code.** Semua gap kernel 3.10 ditangani fallback userspace:
+
+| Fitur | Status | Fallback |
+|---|---|---|
+| memfd_create | ✅ Sudah di-backport di kernel | `TARGET_HAS_MEMFD_BACKPORT` skip version gate ART/perfetto |
+| BinderFS | ❌ Tidak ada (kernel 5.0+) | Legacy device nodes `binder,hwbinder,vndbinder` cukup |
+| BPF/eBPF | ❌ Tidak ada (kernel 3.18+) | netd fallback ke iptables (`BpfUtils.cpp: kver < 4.9 → NONE`) |
+| PSI | ❌ Tidak ada (kernel 4.20+) | lmkd fallback ke vmpressure (`lmkd.cpp:2877`) |
+| schedtune | ❌ Tidak ada | Fallback ke cpu cgroup (`sched_policy.cpp`) |
+| ION | ✅ Masih supported | DMA-BUF transition baru di Android 12+ |
+| FS_VERITY | ❌ Tidak ada (kernel 5.4+) | Opsional, tidak dipakai kecuali fstab flag `fsverity` |
+| Kernel patches LOS | ✅ Tidak ada | `vendor/lineage/patches/` tidak ada |
+
 ---
 
 ## Fase 2 — Device Tree: File Konfigurasi Utama ✅ SELESAI
@@ -397,6 +418,8 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | Fase 1 selesai: kernel lineage-18.1 (6 commit cherry-pick) |
 | 2 Agu 2026 | **Revisi besar**: riset terhadap msm8916-common resmi mengoreksi banyak asumsi. Fase 2 diulang dari base `rb` (bukan a6000). authsecret/fastboot dihapus dari rencana. bluetooth/gnss/configstore/VNDK dikoreksi. |
 | 2 Agu 2026 | **Verifikasi Fase 1**: semua 6 commit kernel diverifikasi terhadap source LOS 18.1 (lmkd.cpp, fs_mgr.cpp, first_stage_mount.cpp, apexd_loop.cpp, vendor/lineage/build/soong). Koreksi: first_stage_mount = no-op di 18.1 (DT fstab), CONFIG_QUOTA = direkomendasikan bukan wajib, lmkd fallback vmpressure otomatis tanpa ro.lmk.use_psi. |
+| 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
+| 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 
 ---
 
