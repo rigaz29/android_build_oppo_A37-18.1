@@ -1,7 +1,8 @@
 # Rencana Porting LineageOS 18.1 — OPPO A37f (MSM8916)
 
-> **Status:** Fase 1–2 selesai & terverifikasi build. Fase 3–4 sudah punya commit di device tree
-> (`475313f`, `d13d764`) tapi belum divalidasi build. Fase 5–9 belum dikerjakan.
+> **Status:** Fase 1–2 selesai, terverifikasi & lolos tes build (`lunch` + `m nothing` + `m dtimage`).
+> Fase 3–4 sudah punya commit di device tree (`475313f`, `d13d764`); konfigurasinya ikut
+> lolos parse penuh, tapi belum divalidasi compile. Fase 5–9 belum dikerjakan.
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -14,7 +15,7 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` (dari `rb` 547f8ca + 1 commit port) | ✅ Fase 2 selesai |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `0ef8022` (dari `rb` 547f8ca + commit port + fix build) | ✅ Fase 2 selesai, lolos `m nothing` |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `meghs-playground/rb-vendor_oppo_A37` | `lineage-17.1` (pin `6a64435`) | ⬜ Perlu branch `lineage-18.1` |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
@@ -206,6 +207,71 @@ Semua perubahan diverifikasi terhadap diff resmi msm8916-common 17.1→18.1.
 - [x] Tidak perlu diubah (format sudah kompatibel)
 
 Pushed ke: https://github.com/rigaz29/rb_device_oppo_A37/tree/lineage-18.1
+
+### Verifikasi & tes Fase 2 (2 Agu 2026)
+
+**Tes yang dijalankan — semua lolos:**
+
+| Tes | Hasil |
+|---|---|
+| `lunch lineage_A37-userdebug` | ✅ `PLATFORM_VERSION=11`, `LINEAGE_VERSION=18.1-...-A37` |
+| `m nothing` (soong analysis + kati parse ±20.700 makefile + packaging rules) | ✅ **build completed successfully** |
+| `m dtbToolOppo dtimage` | ✅ `dt.img` 210.944 B dari 4 varian chipset (206/248/249/250), semua `oppoId: 15399` |
+| Kernel lewat build system LOS | ✅ `out/.../kernel` 16.745.656 B; `.config`-nya memuat patch Fase 1 (`CC_STACKPROTECTOR`, `IP_MULTICAST`, `VETH`, `UTS_NS`, `# CONFIG_FHANDLE is not set`) |
+
+**3 blocker build ditemukan & diperbaiki:**
+
+1. `BUILD_BROKEN_PHONY_TARGETS := true` → **dihapus**. Obsolete di Android 11
+   (`KATI_obsolete_var`); daftar `BUILD_BROKEN_*` yang masih sah ada di
+   `build/make/core/board_config.mk:89-94`. Ini hard error, `lunch` pun gagal.
+2. `usb/Android.bp` + `lights/Android.bp` bergantung pada `libhidltransport` dan
+   `libhwbinder` → **dihapus dari `shared_libs`**. Di Android 11 keduanya dilebur ke
+   `libhidlbase` dan visibility-nya dibatasi `:__subpackages__`
+   (`system/libhidl/Android.bp:113-119`, `system/libhwbinder/Android.bp:64-69`).
+   Catatan: entri `libhidltransport`/`libhwbinder` di `PRODUCT_PACKAGES` (device.mk)
+   **tetap benar** — itu stub runtime untuk blob vendor lama, urusan berbeda.
+3. `dtbtool/Android.mk` pakai `BUILD_HOST_EXECUTABLE` yang obsolete →
+   **dikonversi ke `dtbtool/Android.bp` (`cc_binary_host`)**.
+   `dtbToolOppo` **tidak bisa** diganti `dtbToolLineage` (`system/tools/dtbtool`):
+   varian OPPO menambah field `oppoId` sehingga entry size jadi 28/44 (bukan 24/40),
+   dan bootloader OPPO memakai field itu untuk memilih DT.
+
+**1 escape hatch dipakai:**
+
+- `BUILD_BROKEN_USES_BUILD_COPY_HEADERS := true` — stack GPS device-specific
+  (`gps/core`, `gps/utils`, `gps/loc_api/{ds_api,libloc_api_50001,loc_api_v02}`)
+  masih memakai `LOCAL_COPY_HEADERS`, hard error di
+  `build/make/core/shared_library.mk:59-62`. Flag ini menurunkannya jadi warning.
+  Konversi ke `header_libs` Soong = pekerjaan tersendiri, bukan prasyarat boot.
+
+**Rantai separated-DT terverifikasi utuh di 18.1** (sempat dikira hilang karena
+`kernel.mk` hanya mengenal `BOARD_KERNEL_SEPARATED_DTB**O**`):
+`build/make/core/Makefile:1259` → `--dt dt.img` → dibangun
+`vendor/lineage/build/tasks/dt_image.mk` memakai `$(TARGET_CUSTOM_DTBTOOL)`.
+
+**Koreksi klaim Fase 2:**
+
+- `TARGET_USES_LEGACY_WFD := true` — **tidak ada konsumennya** di tree ini (grep
+  seluruh tree: hanya muncul di BoardConfig A37 sendiri). Juga tidak ada di
+  msm8916-common 18.1; asalnya `ref0-BoardConfig.mk:115`. Harmless tapi mati.
+- `PRODUCT_VENDOR_MOVE_ENABLED := true` — masih dipakai, tapi konsumennya cuma satu:
+  `hardware/qcom-caf/wlan/wcnss-service/Android.mk`.
+- Variabel lain tanpa konsumen (harmless, kandidat bersih-bersih): `DISABLE_APEX_TEST_MODULE`,
+  `TARGET_PLATFORM_DEVICE_BASE`, `MAX_EGL_CACHE_KEY_SIZE`, `MAX_EGL_CACHE_SIZE`,
+  `TARGET_USES_NEW_ION_API`, `BOARD_SUPPRESS_EMMC_WIPE`, `TARGET_USES_MKE2FS`.
+
+**Temuan untuk fase lain:**
+
+- `BUILD_BROKEN_DUP_RULES := true` **masih dibutuhkan**. Duplicate rule yang tersisa:
+  `out/.../vendor/lib/libmm-omxcore.so` — `device.mk:350` memasukkan `libmm-omxcore`
+  ke `PRODUCT_PACKAGES` (build dari source) sementara `vendor/oppo/A37/A37-vendor.mk:242`
+  menyalin blob prebuilt ke path yang sama. Mana yang menang bergantung urutan parsing.
+  Perlu diputuskan di Fase 3/6: buang salah satu.
+- `external/stlport` ada di `lineage.dependencies` tapi **tidak ter-sync** dan build
+  tetap lolos → kandidat kuat untuk dihapus dari dependencies (lihat Fase 8).
+- `dtbtool.c` A37 kehilangan `O_TRUNC` saat membuka output (baris 932; versi kanonik
+  `system/tools/dtbtool/dtbtool.c:926` memakainya). Pada rebuild incremental yang
+  menghasilkan dt.img lebih kecil, sisa byte lama tertinggal. Belum diperbaiki.
 
 ---
 
@@ -508,6 +574,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **Fase 2 diverifikasi & diuji build**: `lunch` + `m nothing` (soong + kati ±20.700 makefile) + `m dtbToolOppo dtimage` semuanya lolos; dt.img 210.944 B dengan `oppoId: 15399` terisi, dan kernel yang dibangun build system memuat patch Fase 1. Tiga blocker Android 11 diperbaiki: `BUILD_BROKEN_PHONY_TARGETS` obsolete (dihapus), `libhidltransport`/`libhwbinder` visibility di `usb`+`lights` Android.bp (dihapus dari shared_libs), `BUILD_HOST_EXECUTABLE` obsolete di dtbtool (dikonversi ke `cc_binary_host`). Escape hatch `BUILD_BROKEN_USES_BUILD_COPY_HEADERS` dipakai untuk stack GPS. Koreksi: `TARGET_USES_LEGACY_WFD` ternyata tanpa konsumen. Temuan untuk fase lain: duplicate rule `libmm-omxcore.so` (device.mk vs A37-vendor.mk), `external/stlport` tidak diperlukan, `dtbtool.c` A37 kehilangan `O_TRUNC`. |
 | 2 Agu 2026 | **Bersih-bersih `7a9d4eb`** (commit `675ae89`, build ke-4 exit 0): `CONFIG_FHANDLE` di-revert — tanpa konsumen di `system/`/`frameworks/` dan AOSP mewajibkannya mati di Q maupun R; ikut menghapus `EXPORTFS` yang di-`select`-nya. `CONFIG_DEBUG_SET_MODULE_RONX` dihapus — tidak pernah mendarat karena `depends on MODULES` sedangkan kernel monolitik. Dari 4 config `7a9d4eb`, tersisa `ENCRYPTED_KEYS` (efektif) dan `CRYPTO_SHA256` (redundan, dibiarkan). |
 
 ---
