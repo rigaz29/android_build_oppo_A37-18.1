@@ -1,8 +1,8 @@
 # Rencana Porting LineageOS 18.1 — OPPO A37f (MSM8916)
 
 > **Status:** Fase 1–2 selesai, terverifikasi & lolos tes build (`lunch` + `m nothing` + `m dtimage`).
-> Fase 3–4 sudah punya commit di device tree (`475313f`, `d13d764`); konfigurasinya ikut
-> lolos parse penuh, tapi belum divalidasi compile. Fase 5–9 belum dikerjakan.
+> Fase 3–4 diverifikasi & lolos `m check-vintf-all` (COMPATIBLE); konfigurasinya ikut
+> lolos parse penuh, tapi belum divalidasi compile penuh. Fase 5–9 belum dikerjakan.
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -15,7 +15,7 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `0ef8022` (dari `rb` 547f8ca + commit port + fix build) | ✅ Fase 2 selesai, lolos `m nothing` |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `8276fea` (dari `rb` 547f8ca + port + fix build + fix VINTF) | ✅ Fase 2–4 lolos `m nothing` + `checkvintf` |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `meghs-playground/rb-vendor_oppo_A37` | `lineage-17.1` (pin `6a64435`) | ⬜ Perlu branch `lineage-18.1` |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
@@ -389,6 +389,73 @@ android.hardware.wifi.supplicant <!-- supplicant bawa fragment -->
 - ~~`authsecret@1.0`~~ — tidak ada di referensi MSM8916
 - ~~`fastboot@1.0`~~ — tidak ada di referensi MSM8916
 
+### Verifikasi & tes Fase 3–4 (2 Agu 2026, commit `8276fea`)
+
+**Tes:** `m nothing` ✅ · `m check-vintf-all` → **`COMPATIBLE`** ✅
+
+#### BUG boot-kritis yang ditemukan: `vendor.lineage.trust` dideklarasikan dua kali
+
+`m check-vintf-all` awalnya **gagal total**:
+
+```
+VINTF parse error: Cannot add manifest fragment
+  /vendor/etc/vintf/manifest/vendor.lineage.trust@1.0-service.xml:
+  HAL "vendor.lineage.trust" has a conflict.
+No device HAL manifest: No such device
+```
+
+Paket `vendor.lineage.trust@1.0-service` membawa VINTF fragment sendiri
+(`hardware/lineage/interfaces/trust/Android.bp`), sementara `manifest.xml` juga
+mendeklarasikannya. `HalManifest::shouldAdd` (`system/libvintf/HalManifest.cpp:44-65`)
+menolak `<hal>` yang major version-nya sudah terdaftar — dan penolakan itu
+**membatalkan seluruh device manifest**, bukan cuma entri yang bentrok. Device jadi
+tanpa manifest VINTF sama sekali. Entri manual dihapus.
+
+> **Aturan sebenarnya (mengoreksi "aturan sinkronisasi" di bawah):** konflik hanya
+> terjadi kalau fragment memakai tag `<version>`. Fragment drm clearkey hanya berisi
+> `<fqname>` tanpa `<version>`, jadi `shouldAdd` tidak pernah menolaknya — karena itu
+> deklarasi paralel drm di `manifest.xml` aman dan memang dipakai msm8916-common 18.1.
+
+#### Fragment yang terpasang (hasil build) vs `manifest.xml`
+
+| Fragment | HAL | Status |
+|---|---|---|
+| `android.hardware.wifi@1.0-service.xml` | wifi | ✅ tidak di manifest — benar |
+| `android.hardware.wifi.hostapd.xml` | hostapd | ✅ tidak di manifest — benar |
+| `manifest.xml` (supplicant) | wifi.supplicant | ✅ tidak di manifest — benar |
+| `android.hardware.health@2.1.xml` | health | ✅ tidak di manifest — benar |
+| `android.hardware.gatekeeper@...software.xml` | gatekeeper | ✅ tidak di manifest — benar |
+| `android.hardware.cas@1.2-service.xml` | cas | ✅ tidak di manifest — benar |
+| `manifest_...drm@1.3-service.clearkey.xml` | drm | ✅ ada di manifest, aman (tanpa `<version>`) |
+| `vendor.lineage.trust@1.0-service.xml` | trust | ❌ **bentrok → diperbaiki** |
+
+#### Improve: interface LiveDisplay yang hilang
+
+Paket livedisplay `-legacymm` dan `-sysfs` **tidak** membawa fragment, jadi tiap
+interface harus dideklarasikan manual. Yang tidak dideklarasikan **tidak bisa diambil
+sama sekali**: dengan `PRODUCT_ENFORCE_VINTF_MANIFEST`, `getTransport()` mengembalikan
+`EMPTY` → `allowLegacy` false → `getService()` langsung `nullptr`
+(`system/libhidl/transport/ServiceManagement.cpp:755-771`).
+
+Sebelumnya hanya `IPictureAdjustment` (diwarisi dari 17.1 — **bukan regresi port**),
+padahal `-sysfs` mendaftarkan enam interface. Ditambahkan dua yang terbukti register:
+
+- `IDisplayColorCalibration` — butuh `/sys/class/graphics/fb0/rgb`;
+  `mdss_livedisplay.c:797` membuat atribut `rgb` **tanpa syarat**
+- `IAdaptiveBacklight` — butuh `acl` atau `cabc`; A37 tidak punya `acl` tapi `cabc`
+  dibuat karena panel 15399 mendeklarasikan `qcom,mdss-dsi-cabc-*-command`
+  (`MODE_CABC`, `mdss_livedisplay.c:801`)
+
+Sisanya (`IDisplayModes`, `ISunlightEnhancement`, `IAutoContrast`, `IColorEnhancement`,
+`IReadingEnhancement`) **sengaja tidak** didaftarkan — tidak ada bukti node sysfs /
+dukungan `libmm-disp-apis`-nya ada, dan mendeklarasikan HAL yang tak pernah register
+membuat `getService()` menunggu lewat jalur `vintfHwbinder` + `Waiter`.
+
+#### Cross-check penyedia: semua 26 `<hal>` punya penyedia
+
+Termasuk yang dilayani blob vendor (`bluetooth.a2dp`, `radio`, `qti.perf`, `qti.iop`)
+dan `configstore` yang datang dari `build/make/target/product/base_vendor.mk:73`.
+
 ### Aturan sinkronisasi
 
 > Setiap `<hal>` di manifest.xml HARUS punya pasangan di `PRODUCT_PACKAGES` (device.mk),
@@ -574,6 +641,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **Fase 3–4 diverifikasi & diuji** (commit `8276fea`): `m check-vintf-all` awalnya **gagal total** — `vendor.lineage.trust` dideklarasikan di `manifest.xml` sekaligus dibawa VINTF fragment paketnya, dan `HalManifest::shouldAdd` menolaknya sehingga **seluruh device manifest batal** ("No device HAL manifest"). Entri manual dihapus → **COMPATIBLE**. Diklarifikasi kenapa drm tidak ikut bentrok: fragment clearkey tanpa tag `<version>`. Improve: `IDisplayColorCalibration` + `IAdaptiveBacklight` ditambahkan ke livedisplay (paketnya tak bawa fragment; tanpa deklarasi `getService()` langsung null karena `PRODUCT_ENFORCE_VINTF_MANIFEST`), dipilih hanya yang terbukti register lewat node sysfs kernel A37. Cross-check: semua 26 `<hal>` punya penyedia. |
 | 2 Agu 2026 | **Fase 2 diverifikasi & diuji build**: `lunch` + `m nothing` (soong + kati ±20.700 makefile) + `m dtbToolOppo dtimage` semuanya lolos; dt.img 210.944 B dengan `oppoId: 15399` terisi, dan kernel yang dibangun build system memuat patch Fase 1. Tiga blocker Android 11 diperbaiki: `BUILD_BROKEN_PHONY_TARGETS` obsolete (dihapus), `libhidltransport`/`libhwbinder` visibility di `usb`+`lights` Android.bp (dihapus dari shared_libs), `BUILD_HOST_EXECUTABLE` obsolete di dtbtool (dikonversi ke `cc_binary_host`). Escape hatch `BUILD_BROKEN_USES_BUILD_COPY_HEADERS` dipakai untuk stack GPS. Koreksi: `TARGET_USES_LEGACY_WFD` ternyata tanpa konsumen. Temuan untuk fase lain: duplicate rule `libmm-omxcore.so` (device.mk vs A37-vendor.mk), `external/stlport` tidak diperlukan, `dtbtool.c` A37 kehilangan `O_TRUNC`. |
 | 2 Agu 2026 | **Bersih-bersih `7a9d4eb`** (commit `675ae89`, build ke-4 exit 0): `CONFIG_FHANDLE` di-revert — tanpa konsumen di `system/`/`frameworks/` dan AOSP mewajibkannya mati di Q maupun R; ikut menghapus `EXPORTFS` yang di-`select`-nya. `CONFIG_DEBUG_SET_MODULE_RONX` dihapus — tidak pernah mendarat karena `depends on MODULES` sedangkan kernel monolitik. Dari 4 config `7a9d4eb`, tersisa `ENCRYPTED_KEYS` (efektif) dan `CRYPTO_SHA256` (redundan, dibiarkan). |
 
