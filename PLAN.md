@@ -3,7 +3,7 @@
 > **Status:** Fase 1–2 selesai, terverifikasi & lolos tes build (`lunch` + `m nothing` + `m dtimage`).
 > Fase 3–4 diverifikasi & lolos `m check-vintf-all` (COMPATIBLE); konfigurasinya ikut
 > lolos parse penuh, tapi belum divalidasi compile penuh. Fase 5 diverifikasi & diperbaiki.
-> Fase 6–9 belum dikerjakan.
+> Fase 6 diverifikasi & diperbaiki. Fase 7–9 belum dikerjakan.
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -16,9 +16,9 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `e9d1daf` (port + fix build + fix VINTF + fix sepolicy) | ✅ Fase 2–5 lolos `m nothing` + `checkvintf` + `selinux_policy` |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `3c9651b` (port + fix build/VINTF/sepolicy/blob) | ✅ Fase 2–6 lolos `m nothing` + `checkvintf` + `selinux_policy` |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
-| `meghs-playground/rb-vendor_oppo_A37` | `lineage-17.1` (pin `6a64435`) | ⬜ Perlu branch `lineage-18.1` |
+| `rigaz29/rb-vendor_oppo_A37` | `lineage-18.1` @ `8349a48` (repo baru, dari `6a64435` + fix Fase 6) | ✅ Fase 6 selesai |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
 | `LineageOS/android_external_stlport` | `lineage-15.1` | ⬜ Cek apakah masih diperlukan |
 
@@ -574,7 +574,69 @@ terhadap `default_prop` saat enforcing.
   - [ ] `bluetooth@1.0-service-qti`
   - [ ] `time_daemon`
   - [ ] DRM Widevine blob — cek apakah butuh `libprotobuf-cpp-lite-v29.so`
-- [ ] Verifikasi semua 328 file di `proprietary-files.txt` masih ada dan benar path-nya
+- [x] Verifikasi semua file di `proprietary-files.txt` masih ada dan benar path-nya
+
+### Verifikasi & tes Fase 6 (2 Agu 2026 — device `3c9651b`, vendor `8349a48`)
+
+**Tes:** `m nothing` ✅ · `m selinux_policy` ✅ · `m check-vintf-all` → `COMPATIBLE` ✅
+· konsistensi daftar blob ✅ · analisis `DT_NEEDED` atas **302 blob ELF** ✅
+
+#### 2 bug ditemukan
+
+**`libmmcamera_tuning.so` ada di repo tapi tidak pernah dipasang.** Tidak terdaftar di
+`proprietary-files.txt` maupun `A37-vendor.mk`, padahal `libmm-qcamera.so` dan
+`liboemcamera.so` mem-`dlopen`-nya lewat nama (terlihat dari `strings`). Sudah didaftarkan.
+
+**`sensors.a6000.so` — sisa port Lenovo A6000.** Disalin ke `/system/lib/` (bukan
+`/vendor/lib/hw/`) dengan nama device yang salah. HAL sensor yang benar-benar dipakai
+adalah `sensors.msm8916` dari source (`device.mk:625`). Pola sama dengan bug lights
+`-service.a6000` sebelumnya. Blob + semua referensinya dihapus.
+
+**Hasil: 338 entri terdaftar = 338 file di disk, nol selisih dua arah.**
+
+#### Dependensi blob: 6 library hilang, 1 bisa ditambal
+
+Dari ROM LineageOS 18.1 A37 yang beredar (tipzbuilds 2022-03-08, dipastikan ELF32/ARM):
+
+| Library hilang | Dibutuhkan oleh | Status |
+|---|---|---|
+| `libthermalclient.so` | `libqti-perfd.so` ← `libqti-perfd-client.so` | ✅ **diambil dari ROM referensi** |
+| `libvcel.so` | `lib-imsvt.so` (IMS video telephony) | ❌ tidak ada di ROM referensi juga |
+| `libmmsw_math/platform/opencl/detail_enhancement.so` | `libvpplibrary.so` ← `libOmxVpp.so` | ❌ tidak ada di ROM referensi juga |
+
+ROM referensi menyelesaikannya dengan **tidak memasang** `libvpplibrary.so` maupun
+`libqti-perfd.so` sama sekali. Tree ini masih memasang keduanya → `libOmxVpp` gagal
+`dlopen` dan video post-processing mati diam-diam. Tidak menghalangi boot; ditinjau ulang
+setelah device hidup.
+
+#### Terverifikasi sudah benar
+
+- **Tidak ada** blob `proprietary/vendor/...` yang salah disalin ke partisi `SYSTEM` (0 kasus)
+- 9 entri ke `TARGET_COPY_OUT_SYSTEM` semuanya memang library sisi system (media/omx/iop)
+- `libbase-v28.so` tetap v28 lewat `device.mk:215` dari `prebuilts/vndk/v28` — sesuai rencana
+- Tidak ada blob yang membutuhkan `libprotobuf-cpp-lite-v28/v29`, jadi item itu **tidak perlu**
+
+#### Duplicate rule `libmm-omxcore`: didokumentasikan, sengaja belum diubah
+
+`BUILD_BROKEN_DUP_RULES` dipicu tepat **satu** target: `vendor/lib/libmm-omxcore.so`.
+Diverifikasi dari perintah ninja bahwa **salinan blob yang menang**, sehingga modul hasil
+build source dikompilasi lalu dibuang.
+
+> Menghapusnya dari `PRODUCT_PACKAGES` **sudah dicoba dan gagal** — modulnya tetap ditarik
+> sebagai dependensi `libOmx*` lain, dan build langsung gagal begitu `BUILD_BROKEN_DUP_RULES`
+> dilepas. Satu-satunya jalan adalah membuang salinan prebuilt dari `A37-vendor.mk`, tapi itu
+> **mengganti biner terpasang** dari blob ke hasil build source — padahal kombinasi blob +
+> `libOmx*` source itulah yang terbukti boot di 17.1. Ditinjau ulang setelah boot.
+
+#### Repo vendor sendiri sudah dibuat
+
+Sebelumnya `vendor/oppo/A37` menunjuk `meghs-playground/rb-vendor_oppo_A37` (bukan milik
+`rigaz29`) sehingga tidak bisa di-push. Repo baru dibuat dan branch di-push:
+
+**`rigaz29/rb-vendor_oppo_A37` branch `lineage-18.1` @ `8349a48`**
+
+`A37.xml` di Fase 8 harus diarahkan ke sini, bukan lagi ke pin `6a64435` milik
+`meghs-playground`.
 
 ---
 
@@ -701,6 +763,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **Fase 6 dikerjakan & diuji** (device `3c9651b`, vendor `8349a48`): analisis `DT_NEEDED` atas 302 blob ELF menemukan 6 library hilang; `libthermalclient.so` diambil dari ROM 18.1 A37 yang beredar (rantai `libqti-perfd-client` → `libqti-perfd` → `libthermalclient`), 5 sisanya juga absen di ROM referensi. Dua bug daftar blob: `libmmcamera_tuning.so` ada di repo tapi tak pernah dipasang padahal di-`dlopen` `libmm-qcamera`/`liboemcamera`, dan `sensors.a6000.so` sisa port Lenovo A6000 disalin ke direktori salah. Hasil: 338 terdaftar = 338 di disk. Duplicate rule `libmm-omxcore` ditelusuri sampai tuntas (blob yang menang; menghapus dari PRODUCT_PACKAGES tidak menolong karena ditarik lewat dependensi) lalu didokumentasikan, bukan diubah. Repo vendor sendiri dibuat: `rigaz29/rb-vendor_oppo_A37`. |
 | 2 Agu 2026 | **Fase 5 diverifikasi & diuji** (commit `e9d1daf`): cek coverage otomatis menemukan `drm@1.3-service.clearkey` tanpa entri `file_contexts` — AOSP hanya melabeli `drm@1.0-service`/`-lazy`, dan `.rc`-nya tak menyetel `seclabel`, jadi binernya berlabel `vendor_file` dan servis DRM jalan di domain `init`. Ditambal → 18/18 HAL service berlabel. Diukur juga alasan sebenarnya `SELINUX_IGNORE_NEVERALLOWS` masih wajib: ~1.500 pelanggaran, 626 dari `property.te` platform dan ratusan dari `sepolicy-legacy` QCOM, hanya 8 milik A37 (`timekeep_app.te:7`). Dicatat dua jebakan pengukuran: override flag harus SETELAH `include sepolicy-legacy` (yang memaksa `:= true`), dan artefak `sepolicy_neverallows` harus dihapus dulu karena `m selinux_policy` tidak membangunnya. |
 | 2 Agu 2026 | **Fase 3–4 diverifikasi & diuji** (commit `8276fea`): `m check-vintf-all` awalnya **gagal total** — `vendor.lineage.trust` dideklarasikan di `manifest.xml` sekaligus dibawa VINTF fragment paketnya, dan `HalManifest::shouldAdd` menolaknya sehingga **seluruh device manifest batal** ("No device HAL manifest"). Entri manual dihapus → **COMPATIBLE**. Diklarifikasi kenapa drm tidak ikut bentrok: fragment clearkey tanpa tag `<version>`. Improve: `IDisplayColorCalibration` + `IAdaptiveBacklight` ditambahkan ke livedisplay (paketnya tak bawa fragment; tanpa deklarasi `getService()` langsung null karena `PRODUCT_ENFORCE_VINTF_MANIFEST`), dipilih hanya yang terbukti register lewat node sysfs kernel A37. Cross-check: semua 26 `<hal>` punya penyedia. |
 | 2 Agu 2026 | **Fase 2 diverifikasi & diuji build**: `lunch` + `m nothing` (soong + kati ±20.700 makefile) + `m dtbToolOppo dtimage` semuanya lolos; dt.img 210.944 B dengan `oppoId: 15399` terisi, dan kernel yang dibangun build system memuat patch Fase 1. Tiga blocker Android 11 diperbaiki: `BUILD_BROKEN_PHONY_TARGETS` obsolete (dihapus), `libhidltransport`/`libhwbinder` visibility di `usb`+`lights` Android.bp (dihapus dari shared_libs), `BUILD_HOST_EXECUTABLE` obsolete di dtbtool (dikonversi ke `cc_binary_host`). Escape hatch `BUILD_BROKEN_USES_BUILD_COPY_HEADERS` dipakai untuk stack GPS. Koreksi: `TARGET_USES_LEGACY_WFD` ternyata tanpa konsumen. Temuan untuk fase lain: duplicate rule `libmm-omxcore.so` (device.mk vs A37-vendor.mk), `external/stlport` tidak diperlukan, `dtbtool.c` A37 kehilangan `O_TRUNC`. |
