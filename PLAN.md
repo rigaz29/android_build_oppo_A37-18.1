@@ -30,11 +30,27 @@ File riset tersimpan di `/tmp/a37-research/` (diff resmi, BoardConfig/manifest/d
 Branch `lineage-18.1` dibuat dari `lz4-backport` (70ef81d) + cherry-pick **6 commit** dari `a12-prep`:
 
 - [x] `51b5a87` — defconfig: pre-create 32 loop devices untuk APEX (sudah `=y` di base, no-op)
+  - ✅ Terverifikasi: `apexd_loop.cpp` butuh loop device untuk mount APEX. Commit no-op.
 - [x] `1433539` — defconfig: enable disk quota (`CONFIG_QUOTA`)
+  - ⚠️ Direkomendasikan, bukan wajib platform. Konsumen = `fs_mgr.cpp:358` (flag `quota`
+    di fstab), bukan vold. Fstab A37 saat ini belum punya flag `quota` → belum boot-kritis.
+    Referensi resmi msm8916 memakainya. Jangan tambah flag `quota` ke fstab sebelum
+    kernel punya CONFIG_QUOTA + CONFIG_QFMT_V2.
 - [x] `1ed9c16` — defconfig: enable memory cgroup (`CONFIG_MEMCG`)
+  - ✅ Wajib. `lmkd.cpp:79-81` baca `/dev/memcg/memory.usage_in_bytes`. Tanpa memcg
+    + tanpa in-kernel LMK → lmkd exit → OOM tak terkendali.
 - [x] `9ed22f6` — defconfig: disable in-kernel LMK → pakai lmkd userspace
+  - ⚠️ Tepat, sesuai referensi resmi. lmkd auto-detect (`lmkd.cpp:2942`): jika
+    `/sys/module/lowmemorykiller/` ada → pakai in-kernel legacy. Disable = pilihan
+    modern (swap-aware). lmkd fallback otomatis ke vmpressure tanpa perlu
+    `ro.lmk.use_psi=false` (baris 2877) — properti itu opsional.
 - [x] `d5d353a` — kbuild: mkdir -p output directory (fix build lewat soong)
-- [x] `fbfa62e` — dts: tambah `first_stage_mount` di fstab system (Android 11+)
+  - ✅ Wajib. `vendor/lineage/build/soong/Android.bp` modul `generated_kernel_includes`:
+    sbox hapus dir → `make O=<dir> headers_install` → kernel 3.10 gagal tanpa mkdir.
+- [x] `fbfa62e` — dts: tambah `first_stage_mount` di fstab system
+  - ⚠️ No-op di 18.1 untuk A37. `first_stage_mount.cpp:159-173`: filtering flag hanya
+    untuk file fstab, A37 pakai DT fstab → semua entri di-mount tanpa filter.
+    Baru wajib di Android 12. Harmless, dipertahankan sebagai persiapan.
 
 > **Kenapa a12-prep gagal boot Android 12 tapi aman untuk 18.1?**
 > Ke-6 commit hanya mengubah defconfig/dts/Makefile. Yang membuat Android 12
@@ -315,7 +331,7 @@ repo `LineageOS/android_device_qcom_sepolicy` branch `lineage-18.1-legacy`
 | Kamera crash | Blob HAL1 vs framework Android 11 — cek `camera.provider@2.4` |
 | SIM tidak terdeteksi | RIL blob butuh `libcutils_shim` |
 | Bluetooth gagal | Prebuilt `bluetooth@1.0-service-qti` vs `bluetooth.audio@2.0` |
-| lmkd crash | `ro.lmk.use_psi=false` belum diset (kernel 3.10 tanpa PSI) |
+| lmkd tidak jalan | CONFIG_MEMCG belum enable di kernel (wajib jika in-kernel LMK dimatikan) |
 
 ---
 
@@ -380,6 +396,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | Rencana awal dibuat (banyak asumsi belum terverifikasi) |
 | 2 Agu 2026 | Fase 1 selesai: kernel lineage-18.1 (6 commit cherry-pick) |
 | 2 Agu 2026 | **Revisi besar**: riset terhadap msm8916-common resmi mengoreksi banyak asumsi. Fase 2 diulang dari base `rb` (bukan a6000). authsecret/fastboot dihapus dari rencana. bluetooth/gnss/configstore/VNDK dikoreksi. |
+| 2 Agu 2026 | **Verifikasi Fase 1**: semua 6 commit kernel diverifikasi terhadap source LOS 18.1 (lmkd.cpp, fs_mgr.cpp, first_stage_mount.cpp, apexd_loop.cpp, vendor/lineage/build/soong). Koreksi: first_stage_mount = no-op di 18.1 (DT fstab), CONFIG_QUOTA = direkomendasikan bukan wajib, lmkd fallback vmpressure otomatis tanpa ro.lmk.use_psi. |
 
 ---
 
