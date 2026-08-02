@@ -3,7 +3,7 @@
 > **Status:** Fase 1–2 selesai, terverifikasi & lolos tes build (`lunch` + `m nothing` + `m dtimage`).
 > Fase 3–4 diverifikasi & lolos `m check-vintf-all` (COMPATIBLE); konfigurasinya ikut
 > lolos parse penuh, tapi belum divalidasi compile penuh. Fase 5 diverifikasi & diperbaiki.
-> Fase 6–7 diverifikasi & diperbaiki. Fase 8–9 belum dikerjakan.
+> Fase 6–8 diverifikasi & diperbaiki. Tersisa Fase 9: build penuh (`mka bacon`).
 > **Target:** LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
 > **Baseline:** LineageOS 17.1 (Android 10) — branch `rb`, terbukti boot sampai homescreen (28 Juli 2026)
 > **Chipset:** Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108, 2 GB RAM, Adreno 306
@@ -16,13 +16,13 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `c8dc9ab` (port + fix build/VINTF/sepolicy/blob/init) | ✅ Fase 2–7 lolos `m nothing` + `checkvintf` + `selinux_policy` + `host_init_verifier` |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `a2b976b` (port + fix build/VINTF/sepolicy/blob/init) | ✅ Fase 2–7 lolos semua tes |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
 | `rigaz29/rb-vendor_oppo_A37` | `lineage-18.1` @ `8349a48` (repo baru, dari `6a64435` + fix Fase 6) | ✅ Fase 6 selesai |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
 | `LineageOS/android_external_stlport` | `lineage-15.1` | ⬜ Cek apakah masih diperlukan |
 
-Build manifest: `rigaz29/android_build_oppo_A37-18.1` → `A37.xml`
+Build manifest: `rigaz29/android_build_oppo_A37-18.1` → `A37.xml` ✅ ditulis & diverifikasi (Fase 8)
 
 File riset tersimpan di `/tmp/a37-research/` (diff resmi, BoardConfig/manifest/device.mk referensi).
 
@@ -732,11 +732,51 @@ pada `/data`, serta `journal_async_commit`. Sebaliknya ROM itu **tidak** punya
 
 **Usaha: Kecil** | **Risiko: Rendah**
 
-- [ ] Update semua `revision` ke branch `lineage-18.1`
-- [ ] `hardware/sony/timekeep` → `lineage-18.1`
-- [ ] Cek apakah `external/stlport` masih diperlukan (kemungkinan tidak)
-- [ ] `device/qcom/sepolicy-legacy` sudah di-handle oleh snippet LOS (branch `lineage-18.1-legacy`)
-- [ ] Repo init: `repo init -u https://github.com/LineageOS/android.git -b lineage-18.1`
+- [x] Update semua `revision` ke branch `lineage-18.1`
+- [x] `hardware/sony/timekeep` → `lineage-18.1`
+- [x] Cek apakah `external/stlport` masih diperlukan — **tidak**, sudah dihapus
+- [x] `device/qcom/sepolicy-legacy` sudah di-handle oleh snippet LOS (branch `lineage-18.1-legacy`)
+- [x] Repo init: `repo init -u https://github.com/LineageOS/android.git -b lineage-18.1`
+
+### Verifikasi & tes Fase 8 (2 Agu 2026)
+
+`A37.xml` ditulis ke repo manifest (sebelumnya repo ini hanya berisi PLAN.md) dan
+disalin ke `.repo/local_manifests/` tree kerja.
+
+**Tes:** XML well-formed ✅ · `repo manifest` parse ✅ · setiap `project@revision` resolve
+di remote ✅ · `m nothing` + `m selinux_policy` + `m check-vintf-all` ✅
+
+| Path | Project | Revision | SHA terverifikasi |
+|---|---|---|---|
+| `device/oppo/A37` | `rigaz29/rb_device_oppo_A37` | `lineage-18.1` | `a2b976b` |
+| `vendor/oppo` | `rigaz29/rb-vendor_oppo_A37` | `lineage-18.1` | `8349a48` |
+| `kernel/oppo/msm8939` | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` | `675ae89` |
+| `hardware/sony/timekeep` | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | `858c544` |
+
+> Path vendor adalah **`vendor/oppo`**, bukan `vendor/oppo/A37` — repo-nya berisi
+> subdirektori `A37/`.
+
+#### Sengaja TIDAK dimasukkan ke manifest
+
+- **`device/qcom/sepolicy-legacy`** — sudah disediakan LineageOS lengkap dengan revision
+  yang benar (`snippets/lineage.xml:64` → `android_device_qcom_sepolicy @ lineage-18.1-legacy`).
+  Mendeklarasikan ulang justru berisiko bentrok revision.
+- **`external/stlport`** — tidak ada di manifest LOS mana pun, tidak pernah ter-sync, dan
+  seluruh build lolos tanpanya. Dihapus juga dari `lineage.dependencies` (commit `a2b976b`).
+
+#### ⚠️ Tree lama perlu `--force-sync` sekali
+
+Karena nama project vendor berubah (`meghs-playground/…` → `rigaz29/…`), `repo sync` biasa
+pada tree yang **sudah ada** akan menolak:
+
+```
+--force-sync not enabled; cannot overwrite a local work tree.
+```
+
+repo mengikat metadata git di `.repo/projects/vendor/oppo.git` ke nama project lama.
+Solusinya sekali jalan: `repo sync --force-sync vendor/oppo` — pastikan dulu tidak ada
+commit lokal di `vendor/oppo` yang belum di-push. `repo init` baru dari nol tidak
+terpengaruh. Sudah didokumentasikan di komentar `A37.xml`.
 
 ---
 
@@ -832,6 +872,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 2 Agu 2026 | **Fase 8 dikerjakan & diuji**: `A37.xml` ditulis ke repo manifest (sebelumnya cuma berisi PLAN.md) dan dipasang di `.repo/local_manifests/`. Keempat `project@revision` diverifikasi resolve di remote dengan SHA yang cocok persis dengan tree kerja. `device/qcom/sepolicy-legacy` sengaja tidak dideklarasikan karena sudah disediakan `snippets/lineage.xml:64` lengkap dengan revision `lineage-18.1-legacy`. `external/stlport` terbukti tidak diperlukan dan dihapus dari `lineage.dependencies` (`a2b976b`). Ditemukan: tree lama butuh `repo sync --force-sync vendor/oppo` sekali karena nama project vendor berubah — sudah didokumentasikan di komentar manifest. |
 | 2 Agu 2026 | **Fase 7 dikerjakan & diuji** (commit `c8dc9ab`) memakai `host_init_verifier`, validator init bawaan Android 11. Dua bug: `load_system_props` deprecated bikin build gagal (dihapus; di runtime pun sudah no-op), dan `/firmware` tidak pernah berlabel `firmware_file` karena vfat tanpa xattr jatuh ke `genfscon vfat -> vfat` sementara policy device memberi izin ke `firmware_file` — ditambahkan opsi mount `context=`. Terverifikasi benar: import path, `ueventd` di `/vendor/ueventd.rc`, `init.recovery.qcom.rc` di `/`, `mount_all`/`swapon_all`, dan 16 service menunjuk biner yang ada. Klaim rencana soal penamaan `ueventd.qcom.rc` dikoreksi: yang berubah nama modul, bukan file terpasang. Cek label service sempat false-positive; dikoreksi dengan membaca xattr asli dari image ROM referensi. |
 | 2 Agu 2026 | **Fase 6 dikerjakan & diuji** (device `3c9651b`, vendor `8349a48`): analisis `DT_NEEDED` atas 302 blob ELF menemukan 6 library hilang; `libthermalclient.so` diambil dari ROM 18.1 A37 yang beredar (rantai `libqti-perfd-client` → `libqti-perfd` → `libthermalclient`), 5 sisanya juga absen di ROM referensi. Dua bug daftar blob: `libmmcamera_tuning.so` ada di repo tapi tak pernah dipasang padahal di-`dlopen` `libmm-qcamera`/`liboemcamera`, dan `sensors.a6000.so` sisa port Lenovo A6000 disalin ke direktori salah. Hasil: 338 terdaftar = 338 di disk. Duplicate rule `libmm-omxcore` ditelusuri sampai tuntas (blob yang menang; menghapus dari PRODUCT_PACKAGES tidak menolong karena ditarik lewat dependensi) lalu didokumentasikan, bukan diubah. Repo vendor sendiri dibuat: `rigaz29/rb-vendor_oppo_A37`. |
 | 2 Agu 2026 | **Fase 5 diverifikasi & diuji** (commit `e9d1daf`): cek coverage otomatis menemukan `drm@1.3-service.clearkey` tanpa entri `file_contexts` — AOSP hanya melabeli `drm@1.0-service`/`-lazy`, dan `.rc`-nya tak menyetel `seclabel`, jadi binernya berlabel `vendor_file` dan servis DRM jalan di domain `init`. Ditambal → 18/18 HAL service berlabel. Diukur juga alasan sebenarnya `SELINUX_IGNORE_NEVERALLOWS` masih wajib: ~1.500 pelanggaran, 626 dari `property.te` platform dan ratusan dari `sepolicy-legacy` QCOM, hanya 8 milik A37 (`timekeep_app.te:7`). Dicatat dua jebakan pengukuran: override flag harus SETELAH `include sepolicy-legacy` (yang memaksa `:= true`), dan artefak `sepolicy_neverallows` harus dihapus dulu karena `m selinux_policy` tidak membangunnya. |

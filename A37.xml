@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Local manifest: LineageOS 18.1 (Android 11) untuk OPPO A37 / A37f / A37fw
+  Chipset: Qualcomm MSM8916 (Snapdragon 410), kernel 3.10.108
+
+  Cara pakai:
+      repo init -u https://github.com/LineageOS/android.git -b lineage-18.1
+      mkdir -p .repo/local_manifests
+      cp A37.xml .repo/local_manifests/A37.xml
+      repo sync -c -j8
+
+      source build/envsetup.sh
+      breakfast lineage_A37-userdebug
+      mka bacon
+
+  CATATAN untuk tree yang SUDAH ada dari manifest lama:
+      Nama project vendor berubah dari meghs-playground/rb-vendor_oppo_A37
+      menjadi rigaz29/rb-vendor_oppo_A37. `repo sync` biasa akan menolak:
+
+          --force-sync not enabled; cannot overwrite a local work tree.
+
+      Itu karena repo mengikat metadata git di .repo/projects/vendor/oppo.git
+      ke nama project lama. Jalankan sekali:
+
+          repo sync --force-sync vendor/oppo
+
+      Pastikan dulu tidak ada commit lokal di vendor/oppo yang belum di-push,
+      karena --force-sync menimpa metadata work tree. Untuk `repo init` baru
+      dari nol tidak ada masalah ini.
+
+  Yang SENGAJA tidak ada di sini:
+
+    device/qcom/sepolicy-legacy
+        Sudah disediakan manifest LineageOS sendiri, lengkap dengan revision
+        yang benar: snippets/lineage.xml:64 memakai
+        LineageOS/android_device_qcom_sepolicy @ lineage-18.1-legacy.
+        Menambahkannya di sini justru berisiko bentrok revision.
+
+    external/stlport
+        Masih tercantum di device/oppo/A37/lineage.dependencies pada 17.1,
+        tetapi tidak ada di manifest LineageOS 18.1 mana pun dan build penuh
+        (m nothing + selinux_policy + check-vintf-all) lolos tanpanya.
+        Sudah dihapus dari lineage.dependencies.
+-->
+<manifest>
+  <remote name="gh" fetch="https://github.com/" />
+
+  <!-- Device tree.
+       Base branch `rb` (17.1 yang terbukti boot) + port 18.1 + perbaikan
+       Fase 2-7: blocker build Android 11, konflik VINTF, sepolicy, daftar
+       blob, dan init script. -->
+  <project name="rigaz29/rb_device_oppo_A37" path="device/oppo/A37"
+           remote="gh" revision="lineage-18.1" />
+
+  <!-- Vendor blobs.
+       Repo sendiri, dibuat dari meghs-playground/rb-vendor_oppo_A37 @ 6a64435
+       lalu ditambah perbaikan Fase 6: libthermalclient.so, pendaftaran
+       libmmcamera_tuning.so, dan pembuangan sisa port a6000.
+       Perhatikan path-nya `vendor/oppo` (repo berisi subdirektori A37/),
+       bukan `vendor/oppo/A37`. -->
+  <project name="rigaz29/rb-vendor_oppo_A37" path="vendor/oppo"
+           remote="gh" revision="lineage-18.1" />
+
+  <!-- Kernel 3.10.108.
+       lz4-backport + 6 commit a12-prep + 3 commit verifikasi (perbaikan
+       CC_STACKPROTECTOR dan 14 opsi dari audit android-base.config R). -->
+  <project name="rigaz29/kernel_oppo_msm8939" path="kernel/oppo/msm8939"
+           remote="gh" revision="lineage-18.1" />
+
+  <!-- Dependency dari device/oppo/A37/lineage.dependencies.
+       Tidak ada di manifest LineageOS, jadi harus dideklarasikan di sini. -->
+  <project name="LineageOS/android_hardware_sony_timekeep" path="hardware/sony/timekeep"
+           remote="gh" revision="lineage-18.1" />
+</manifest>
