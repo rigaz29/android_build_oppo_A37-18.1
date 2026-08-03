@@ -1233,7 +1233,7 @@ sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya dit
 
 | Item | Status |
 |---|---|
-| Long-press ikon Quick Settings mengunci layar | **Masih bug** setelah 10.17 — ditunda atas permintaan; mulai dari `logcat -b crash` |
+| Long-press ikon Quick Settings mengunci layar | **Tidak diperbaiki** — bug hulu LineageOS 18.1, penyebab & perbaikannya sudah dipetakan di 10.17 |
 | Tes fungsional: kamera, audio, panggilan, BT, GPS | Belum satu pun dicoba dipakai |
 | Ledakan `SET_BROADCAST_CONFIG` saat boot | ~110 permintaan gagal lalu berhenti; berisik, tidak merusak |
 | 66 denial avc | Semuanya `permissive=1` — kebersihan policy, bukan bug (10.13) |
@@ -1296,7 +1296,11 @@ hilang: boost untuk interaksi **tanpa** sentuhan (rotasi layar, animasi window l
 
 Terverifikasi di device: `--w--w---- system system`, log `PowerHAL` bersih.
 
-### 10.17 Crash SystemUI `AssistManager` — fork platform pertama, ⚠️ BELUM SEMBUH
+### 10.17 Crash SystemUI `AssistManager` — DITINGGALKAN, fork platform dibatalkan
+
+> **Status akhir:** bug hulu LineageOS 18.1, bukan khas A37. Fork platform dibatalkan
+> dan `frameworks/base` dikembalikan ke `LineageOS/android_frameworks_base @ 557ec5dffbd`.
+> Catatan di bawah disimpan untuk referensi kalau nanti dilaporkan ke hulu.
 
 ```
 FATAL EXCEPTION: AsyncTask #2
@@ -1362,13 +1366,55 @@ adalah satu-satunya penyebab gejala ini. Kemungkinan yang belum dipisahkan:
 3. Layar terkunci bukan karena SystemUI mati sama sekali, melainkan sebab lain
    (mis. `dismissKeyguardThenExecute` yang justru memicu keyguard).
 
-**Langkah pertama saat dilanjutkan nanti:** `adb logcat -b crash -d` tepat setelah gejala
-muncul. Kalau buffer crash kosong, hipotesis 3 yang benar dan seluruh arah analisis ini
-harus diganti — bukan ditambal lagi.
+#### `logcat -b crash` menjawabnya: tambalan mendarat, tapi masalahnya lebih luas
 
-Fork platform tetap dipertahankan: perbaikannya sendiri benar secara semantik
-(`AssistDisclosure` memang butuh Looper utama) dan `mka SystemUI` lolos, tapi ia bukan
-jawaban atas gejala yang dilaporkan.
+Stack **berpindah** — frame `AssistManager.java:208` hilang, berganti:
+
+```
+at android.view.ViewRootImpl$ViewRootHandler.<init>(ViewRootImpl.java:4851)
+at android.view.WindowManagerGlobal.addView(WindowManagerGlobal.java:399)
+at com.android.systemui.assist.AssistManager$3.onConfigChanged(AssistManager.java:184)
+at com.android.systemui.assist.AssistManager.<init>(AssistManager.java:239)
+```
+
+Baris 239 konstruktor memanggil listener konfigurasinya sendiri:
+
+```java
+mConfigurationListener.onConfigChanged(context.getResources().getConfiguration());
+```
+
+Listener itu mengembang layout lalu `mWindowManager.addView(mView, lp)`, dan `addView()`
+membuat `ViewRootImpl` → `ViewRootHandler` → `new Handler()` di dalam framework.
+
+Artinya **seluruh konstruktor `AssistManager` wajib berjalan di main thread** — ia
+mengembang layout dan memasang view. Menambal `new Handler()` satu per satu adalah main
+pukul tikus.
+
+**Kesalahan metodologi saya, dan bentuknya berulang.** Saya menyatakan sudah menyisir
+paket `assist` dan "tidak ada kegagalan berikutnya yang menunggu". Yang saya cari adalah
+literal `new Handler()`, padahal yang seharusnya dicari adalah **apa pun yang
+membutuhkan Looper**. `addView()` tidak mengandung teks itu sama sekali. Ini persis
+bentuk kesalahan di 10.6 (memeriksa 25 dari 305 simbol RIL lalu menyatakan aman):
+pencarian yang terlalu sempit, lalu klaim tuntas.
+
+**Arah yang benar** (tidak dikerjakan): berhenti membangun `AssistManager` di luar main
+thread, bukan menambal Handler. Di `StatusBar.java:2910`:
+
+```java
+mHandler.post(() -> mAssistManagerLazy.get().hideAssist());
+```
+
+`mHandler` terverifikasi aman — `StatusBar.java:559` menginisialisasinya sebagai field
+(`new StatusBar.H()`) dan `StatusBar` dibangun Dagger di main thread.
+
+**Keputusan: tidak dikerjakan.** Ini bug hulu yang kena semua device LineageOS 18.1.
+Memperbaikinya di sini berarti menahan `frameworks/base` di commit sendiri dan
+me-rebase-nya tiap patch keamanan bulanan — biaya perawatan yang tidak sepadan.
+`A37.xml` dikembalikan ke `frameworks/base` bawaan LineageOS, dan tree lokal
+di-checkout ulang ke `557ec5dffbd`.
+
+Repo `rigaz29/android_frameworks_base` di GitHub dibiarkan (tidak dipakai manifest,
+tidak mengganggu); hapus manual kalau tidak diinginkan.
 
 ### Terverifikasi di device (build 20260803_140427)
 

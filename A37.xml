@@ -72,21 +72,15 @@
   <project name="LineageOS/android_hardware_sony_timekeep" path="hardware/sony/timekeep"
            remote="gh" revision="lineage-18.1" />
 
-  <!-- Platform fork: SATU commit di atas LineageOS/android_frameworks_base
-       @ lineage-18.1 (557ec5dffbd).
+  <!-- TIDAK ADA fork platform di sini, dan itu disengaja.
 
-       Isinya perbaikan crash SystemUI: AssistManager memanggil new Handler()
-       tanpa argumen, padahal Dagger bisa membangunnya di thread AsyncTask yang
-       tidak punya Looper — lihat Fase 10.17 di PLAN.md.
+       Sempat ada rigaz29/android_frameworks_base untuk menambal crash SystemUI
+       (long-press ikon Quick Settings mengunci layar), lalu dibatalkan: itu bug
+       hulu LineageOS 18.1 yang kena semua device, bukan khas A37, jadi
+       memperbaikinya di sini berarti menahan frameworks/base di commit sendiri
+       dan harus di-rebase tiap patch keamanan bulanan — biaya perawatan yang
+       tidak sepadan untuk bug yang seharusnya diperbaiki hulu.
 
-       Ini bug hulu yang kena semua device LineageOS 18.1, bukan khas A37.
-       Kalau nanti upstream memperbaikinya sendiri, baris ini harus dibuang dan
-       project-nya dikembalikan ke manifest LineageOS, supaya tidak menahan
-       frameworks/base di commit lama.
-
-       remove-project wajib: tanpa itu repo akan menolak karena path
-       frameworks/base sudah dideklarasikan snippets/lineage.xml. -->
-  <remove-project name="LineageOS/android_frameworks_base" />
-  <project name="rigaz29/android_frameworks_base" path="frameworks/base"
-           remote="gh" revision="lineage-18.1" />
+       Rincian analisisnya tetap disimpan di PLAN.md Fase 10.17 kalau nanti mau
+       dilanjutkan atau dilaporkan ke hulu. -->
 </manifest>
