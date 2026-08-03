@@ -1086,6 +1086,33 @@ dipakai. `net_raw` memang yang dibutuhkan — daemon ini bicara ke modem lewat s
 build terbuang karena saya menyimpulkan "setgid" berarti `AID_SYSTEM` dari konteks
 `mkdir /data/time/ 0700 system system` di file yang sama.
 
+**Dan perbaikan itu ternyata harus dibatalkan.** Dengan `group net_raw system`
+daemon-nya akhirnya benar-benar berjalan — lalu device **reboot sendiri ke recovery
+sekitar semenit setelah boot**. Delta fungsional antara build stabil
+(`20260803_140427`) dan build yang reboot (`20260803_150414`) hanya satu baris
+`group`, jadi justru keberhasilannya yang merusak: setelah lolos, daemon memanggil
+`settimeofday()` dan membuka jalur QMI ke modem.
+
+Dugaan jalur ke recovery (**belum diverifikasi dari log**): jam sistem yang dilompatkan
+ke nilai ngawur memicu eskalasi `RescueParty` sampai `LEVEL_FACTORY_RESET`, yang
+memanggil `RecoverySystem.rebootPromptAndWipeUserData()`
+(`RescueParty.java:273-280`) — boot ke recovery dengan tawaran hapus data. Jendela
+throttling RescueParty berbasis wall clock, jadi jam rusak memang cara klasik
+memicunya.
+
+**Keputusan akhir: service `time_daemon` dibuang seluruhnya** (`af5a463`). ATS
+Qualcomm ini tidak kompatibel dengan Android 11 di device ini; fungsinya sudah
+digantikan NTP dan NITZ, dan ROM LOS 18.1 A37 yang beredar juga tidak
+menjalankannya. Riwayat empat langkahnya ditulis sebagai komentar di `init.qcom.rc`
+supaya tidak ada yang mencoba menghidupkannya lagi.
+
+**Pelajaran kedua, yang lebih mahal:** bug "daemon gagal start" dan bug "daemon
+merusak sistem" bisa jadi bug yang sama. Selama tiga build saya memperlakukan loop
+restart itu sebagai sesuatu yang harus disembuhkan, padahal loop itu justru yang
+melindungi sistem. Kalau sebuah daemon vendor sudah gagal berlapis-lapis di
+platform yang jauh lebih baru, kegagalannya sendiri adalah sinyal — bukan sekadar
+rintangan.
+
 ### 10.9 Widevine crash-loop tiap 5 detik
 
 Kedua `android.hardware.drm@1.x-service.widevine` gagal link sejak boot dan di-restart
@@ -1130,6 +1157,7 @@ sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya dit
 | `SIM_COUNT` tidak diset di BoardConfig | Belum diputuskan — lihat catatan di bawah |
 | ~68 denial avc sisa (mayoritas domain `mm`) | Belum ditelusuri |
 | Deteksi SIM & panggilan | Belum diuji — device diuji tanpa SIM terpasang |
+| Penyebab reboot-ke-recovery (10.8) | Dugaan RescueParty belum dibuktikan dari pstore/BCB |
 
 ### Terverifikasi di device (build 20260803_140427)
 
