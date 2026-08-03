@@ -1233,6 +1233,7 @@ sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya dit
 
 | Item | Status |
 |---|---|
+| Long-press ikon Quick Settings mengunci layar | **Masih bug** setelah 10.17 — ditunda atas permintaan; mulai dari `logcat -b crash` |
 | Tes fungsional: kamera, audio, panggilan, BT, GPS | Belum satu pun dicoba dipakai |
 | Ledakan `SET_BROADCAST_CONFIG` saat boot | ~110 permintaan gagal lalu berhenti; berisik, tidak merusak |
 | 66 denial avc | Semuanya `permissive=1` — kebersihan policy, bukan bug (10.13) |
@@ -1295,7 +1296,7 @@ hilang: boost untuk interaksi **tanpa** sentuhan (rotasi layar, animasi window l
 
 Terverifikasi di device: `--w--w---- system system`, log `PowerHAL` bersih.
 
-### 10.17 Crash SystemUI `AssistManager` — fork platform pertama
+### 10.17 Crash SystemUI `AssistManager` — fork platform pertama, ⚠️ BELUM SEMBUH
 
 ```
 FATAL EXCEPTION: AsyncTask #2
@@ -1337,6 +1338,37 @@ karena path `frameworks/base` sudah dideklarasikan `snippets/lineage.xml`.
 > Kalau upstream memperbaikinya sendiri, entri ini **harus dibuang** dan project-nya
 > dikembalikan ke manifest LineageOS — kalau tidak, `frameworks/base` tertahan di commit
 > lama dan ketinggalan patch keamanan.
+
+#### ⚠️ Hasil di device: MASIH BUG (build `20260803_175743`)
+
+Gejalanya tidak berubah — long-press ikon Quick Settings tetap mengunci layar alih-alih
+membuka pengaturan terkait. Jadi tambalan `Looper.getMainLooper()` **tidak menyelesaikan
+masalah ini**, dan diagnosis di atas belum lengkap.
+
+Yang tetap valid (dibaca langsung dari kode, bukan dugaan):
+
+- Rantai `QSTileImpl.handleLongClick:360` → `StatusBar.java:2910` →
+  `AsyncTask.execute(runnable)` di `StatusBar.java:2977` memang berjalan di thread tanpa
+  Looper.
+- `AssistManager` memang singleton Dagger yang di-cache, dan `showKeyguard():3412`
+  membangunnya dari main thread.
+
+Yang ternyata **tidak** terbukti: bahwa `new Handler()` di `AssistManager.java:208`
+adalah satu-satunya penyebab gejala ini. Kemungkinan yang belum dipisahkan:
+
+1. Build yang diuji bukan `20260803_175743` (hash
+   `e52d2a7ff1c09d4cbeda4ab8da6352825355c4b374ea7be8d8c4a4ea70986207` — perlu dicocokkan).
+2. SystemUI jatuh karena exception lain di jalur yang sama.
+3. Layar terkunci bukan karena SystemUI mati sama sekali, melainkan sebab lain
+   (mis. `dismissKeyguardThenExecute` yang justru memicu keyguard).
+
+**Langkah pertama saat dilanjutkan nanti:** `adb logcat -b crash -d` tepat setelah gejala
+muncul. Kalau buffer crash kosong, hipotesis 3 yang benar dan seluruh arah analisis ini
+harus diganti — bukan ditambal lagi.
+
+Fork platform tetap dipertahankan: perbaikannya sendiri benar secara semantik
+(`AssistDisclosure` memang butuh Looper utama) dan `mka SystemUI` lolos, tapi ia bukan
+jawaban atas gejala yang dilaporkan.
 
 ### Terverifikasi di device (build 20260803_140427)
 
