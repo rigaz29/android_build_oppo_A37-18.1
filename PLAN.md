@@ -929,9 +929,191 @@ Kernel `Image` 19.743.544 B (naik dari 16.745.656 — mendekati kernel ROM refer
 20.105.976 B, menguatkan dugaan mereka juga menyalakan opsi debug ini). 5 warning,
 0 error. `mka bacon` ulang: **exit 0 dalam 6:21** →
 `lineage-18.1-20260803-UNOFFICIAL-rigaz29-A37.zip`, `boot.img` 19,9 MB.
-5. [ ] Kumpulkan log: `logcat -b all`, `dmesg`, `cat /proc/last_kmsg`
-6. [ ] Identifikasi HAL yang gagal register → perbaiki manifest.xml / device.mk
+5. [x] Kumpulkan log: `logcat -b all`, `dmesg`, `cat /proc/last_kmsg`
+6. [x] Identifikasi HAL yang gagal register → perbaiki manifest.xml / device.mk
 7. [ ] Iterasi sampai stabil
+
+---
+
+## Fase 10 — Debug di Device (3 Agu 2026)
+
+ROM booting sampai homescreen pada percobaan pertama. Bug-bug di bawah ditemukan dari
+pengujian nyata di device, bukan dari analisis statis.
+
+### 10.1 Layar hitam + reboot otomatis ~60 detik
+
+**Gejala:** masuk homescreen tapi layar hitam; tombol power/volume/home/back bikin layar
+glitch; device reboot sendiri setelah semenit.
+
+**Penyebab:** entri `IAdaptiveBacklight` yang saya tambahkan ke `manifest.xml` di Fase 4.
+Tidak ada implementasinya, jadi `system_server` menggantung di `getService()` dan
+`Watchdog.java:79` (`DEFAULT_TIMEOUT = 60*1000`) membunuh prosesnya — persis 60 detik.
+
+**Koreksi analisis saya:** alasan saya menambahkannya salah. Saya berargumen panel punya
+`qcom,mdss-dsi-cabc-*` di DTS, padahal driver LiveDisplay hanya membaca
+`cm,mdss-livedisplay-*` (`mdss_livedisplay.c:671-682`). Entri dihapus; kini livedisplay
+hanya mendeklarasikan `IPictureAdjustment` + `IDisplayColorCalibration`.
+
+**Pelajaran:** deklarasi HAL tanpa implementasi bukan sekadar mubazir — untuk klien yang
+memanggil `getService()` dengan `retry=true`, itu berarti blocking selamanya.
+
+### 10.2 Notifikasi "Serial console enabled"
+
+Dua penyebab berturut-turut:
+
+1. `console=` di kernel cmdline → dihapus. **Ternyata belum cukup.**
+2. `printk.c:2615-2626` mengaktifkan otomatis console pertama yang mendaftar, tanpa
+   perlu `console=`. Perbaikan sebenarnya: `# CONFIG_SERIAL_MSM_HSL_CONSOLE is not set`
+   di defconfig, sambil tetap `CONFIG_SERIAL_MSM_HSL=y` supaya UART tetap ada untuk
+   `earlyprintk`.
+
+### 10.3 Settings blank & freeze
+
+**Penyebab:** modul Tethering. `InProcessTethering` (modul aplikasi) tidak memasang
+apa-apa; yang benar `com.android.tethering.inprocess` lewat mekanisme `override_apex`.
+Sebelum diperbaiki, log menunjukkan `BOOT FAILURE starting Tethering` karena sertifikat
+`MAINLINE_NETWORK_STACK` tidak cocok (platform vs networkstack).
+
+**Terverifikasi sembuh:** `BOOT FAILURE` hilang, `dumpsys tethering` mengeluarkan state
+lengkap (wlan0 AvailableState, BPF offload aktif).
+
+### 10.4 `mm-pp-daemon` 99% CPU
+
+Blob `mm-pp-daemon` bawaan stock berputar tanpa henti. Diganti varian dari ROM referensi
+(112.448 B, tanpa dependensi `libqservice`). Terverifikasi: tidak lagi muncul di `top`,
+idle 366% dari 400%.
+
+### 10.5 `seclabel` palsu pada `time_daemon`
+
+`init.qcom.rc` memuat `seclabel u:object_r:time_daemon_exec:s0` — itu label **file**
+(exec type), bukan domain. Akibatnya proses berjalan dengan konteks tak sah dan logcat
+dibanjiri denial. Dihapus supaya init memakai transisi otomatis dari
+`init_daemon_domain(time_daemon)`.
+
+**Hasil:** denial avc turun **605 → 68**.
+
+### 10.6 RIL gagal — dua penyebab beruntun
+
+`rild` gagal `dlopen` blob sejak boot, sehingga `IRadio` tidak pernah register dan
+`com.android.phone` menggantung di `IRadio.getService()` lalu kena ANR berulang.
+
+1. Pemetaan `libcutils_shim` di `TARGET_LD_SHIM_LIBS` menunjuk modul yang tidak pernah
+   ada → dibuang.
+2. Muncul simbol berikutnya: `android::AudioSystem::setErrorCallback(void(*)(int))`,
+   dihapus total dari `libaudioclient` di Android 11 (diverifikasi dua arah: tidak ada di
+   ekspor `libaudioclient.so` hasil build, tidak ada lagi di `AudioSystem.h`). Dibuatkan
+   `libril_shim` (`device/oppo/A37/libshims/AudioSystem_ril.cpp`).
+
+**Dua kesalahan metodologi saya di sini:**
+
+- Pemeriksaan simbol pertama hanya mencakup **25 dari 305** simbol UND, jadi
+  `setErrorCallback` lolos. Diulang lengkap terhadap indeks 207.008 simbol dari semua
+  library terpasang.
+- Saya sempat "memverifikasi" perbaikan dengan memeriksa `DT_NEEDED` blob. Itu mekanisme
+  yang salah: `TARGET_LD_SHIM_LIBS` **tidak** menambal blob, melainkan dikompilasi ke
+  dalam linker (`-DLD_SHIM_LIBS`, `linker_main.cpp:420-422`, `linker.cpp:666`) dan
+  diterapkan saat runtime. Verifikasi yang benar: string pemetaannya ada di dalam biner
+  linker terbangun.
+
+### 10.7 `IRadio` tidak pernah register meski `rild` hidup — akar masalah ANR
+
+Setelah 10.6, `rild` hidup stabil (2 proses, tidak restart), `dlopen` sukses, tapi
+`lshal` tetap tidak memperlihatkan `android.hardware.radio` sama sekali dan ANR
+`com.android.phone` berlanjut.
+
+**Akar masalah:** `manifest.xml` mendeklarasikan `android.hardware.radio` versi **1.0**,
+padahal libril mendaftarkan `RadioImpl` sebagai **`@1.1::IRadio`**
+(`ril_service.cpp:130` — `struct RadioImpl : public V1_1::IRadio`).
+
+Rantai sebabnya:
+
+1. `registerAsServiceInternal()` (`ServiceManagement.cpp:838-847`) menolak mendaftar bila
+   transport HAL menurut manifest bukan `HWBINDER`.
+2. `HalManifest::getHidlTransport()` mencocokkan versi dengan `minorAtLeast()`
+   (`HalManifest.cpp:168`, `Version.h:64`). Deklarasi 1.0 **tidak** memenuhi permintaan
+   1.1 → transport `EMPTY`.
+3. Pendaftaran gagal diam-diam. `rild` tetap hidup karena `registerService()` tidak
+   memeriksa status kembaliannya.
+4. `RIL.java:493-541` mencoba `getService()` dari V1_5 turun ke V1_0. V1_5–V1_2 gagal
+   cepat (tidak dideklarasikan), lalu **V1_0 dideklarasikan → `retry=true` → blocking
+   selamanya** di thread utama `com.android.phone` → ANR.
+
+**Perbaikan:** `<version>1.0</version>` → `<version>1.1</version>`. Deklarasi 1.1
+sekaligus memenuhi permintaan 1.0 (`minorAtLeast` searah), dan `ISap` juga `V1_1`
+(`sap_service.cpp:45`). ROM referensi memang mendeklarasikan 1.1.
+
+**Bug sejenis di HAL yang sama:** `android.hardware.radio.deprecated` dideklarasikan
+`passthrough`, padahal `OemHookImpl` didaftarkan lewat `registerAsService()`
+(`ril_service.cpp:8733-8737`) alias binderized. Diperbaiki jadi `hwbinder`.
+(`kOemHookEnabled` = true karena `DISABLE_RILD_OEM_HOOK` tidak diset di mana pun.)
+
+### 10.8 `time_daemon` keluar status 255 dalam loop restart
+
+**Bukan** akibat perbaikan 10.5 — dihitung: 62 restart sebelum, 65 sesudah.
+
+**Penyebab sebenarnya** (dari `QC-time-services: Error changing gid:-1`): service
+dideklarasikan `user root` / `group root` **plus** `capabilities SYS_TIME`. Baris
+`capabilities` memangkas bounding set jadi hanya `CAP_SYS_TIME`
+(`capabilities.cpp:180-203` → `DropBoundingSet`), sehingga proses root pun kehilangan
+`CAP_SETGID`, dan `setgid()` gagal EPERM lalu binernya `exit(-1)`.
+
+**Perbaikan:** `user system` / `group system`. Dengan begitu `setgid`/`setuid` ke
+`AID_SYSTEM` jadi no-op yang lolos tanpa `CAP_SETGID`, sementara `CAP_SYS_TIME` tetap
+terbawa lewat ambient set. Konsisten dengan `mkdir /data/time/ 0700 system system` di
+file yang sama.
+
+### 10.9 Widevine crash-loop tiap 5 detik
+
+Kedua `android.hardware.drm@1.x-service.widevine` gagal link sejak boot dan di-restart
+init selamanya:
+
+- `@1.0-service` → `cannot locate symbol _ZTTN5wvdrm...WVDrmFactoryE` (pasangannya
+  `libwvhidl.so` versi 1.1 — tidak cocok)
+- `@1.1-service` → `libwvhidl.so` butuh simbol protobuf lama
+
+`libwvhidl.so` menaut ke `libprotobuf-cpp-lite.so` era protobuf 3.0-beta: **12 simbol
+hilang** (`empty_string_`, `InitEmptyString`, `Arena::AllocateAligned`,
+`CodedOutputStream::VarintSize64`, `LazyStringOutputStream`, dst). Permukaan ABI-nya
+terlalu lebar untuk di-shim seperti `libril_shim`.
+
+**Keputusan:** kedua service + `libwvhidl.so` dibuang dari daftar blob, instance
+`widevine` dibuang dari manifest. `libwvdrmengine.so` (plugin legacy) dipertahankan,
+tapi ia butuh protobuf lama yang sama — Widevine baru bisa hidup kalau blob
+`libprotobuf-cpp-lite.so` seangkatan ikut ditambahkan.
+
+### 10.10 `bluetooth.a2dp` dideklarasikan tanpa implementasi
+
+`IBluetoothAudioOffload` dideklarasikan `hwbinder` tapi `vendor/lib/hw` hanya punya
+`bluetooth.audio@2.0-impl`, dan `ro.bluetooth.a2dp_offload.supported` tidak pernah
+diset. A2DP offload memang tidak didukung msm8916. Dibuang — kelas bug yang sama dengan
+10.1 (deklarasi kosong = `getService()` menggantung).
+
+Sekalian: `android.hardware.renderscript` dideklarasikan tanpa blok `<interface>` sama
+sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya ditambahkan.
+
+### 10.11 USB debugging default on
+
+`WITH_ADB_INSECURE := true` + `LINEAGE_VERSION_APPEND_TIME_OF_DAY := true` di
+`lineage_A37.mk`, **sebelum** baris `inherit` (switch LineageOS dibaca di
+`vendor/lineage/config/common.mk` saat inherit).
+
+> ⚠️ `WITH_ADB_INSECURE` **wajib dibuang sebelum rilis publik.**
+
+### Yang masih terbuka
+
+| Item | Status |
+|---|---|
+| `SIM_COUNT` tidak diset di BoardConfig | Belum diputuskan — lihat catatan di bawah |
+| ~68 denial avc sisa (mayoritas domain `mm`) | Belum ditelusuri |
+
+**Catatan `SIM_COUNT`:** device ini DSDS (`persist.radio.multisim.config=dsds`, ada
+`ril-daemon` + `ril-daemon2`). `SIM_COUNT` tidak diset di mana pun, jadi libril dibangun
+tanpa `ANDROID_MULTI_SIM` → `RIL_RequestFunc` bersignature 4 argumen, sedangkan blob
+QCRIL kemungkinan mengharap 5 (`socket_id`). Di sisi lain, menyetel `SIM_COUNT := 2`
+membuat **tiap** rild mendaftarkan slot1 *dan* slot2 (`ril_service.cpp:8701-8716`),
+sehingga dua proses rild akan saling menimpa. Karena dengan konfigurasi sekarang rild1
+mendaftar `slot1` dan rild2 mendaftar `slot2` dengan rapi, ini dibiarkan dulu dan diuji
+di device: kalau SIM terdeteksi dan berfungsi, tidak ada yang perlu diubah.
 
 ### Masalah umum yang diantisipasi
 
@@ -942,7 +1124,7 @@ Kernel `Image` 19.743.544 B (naik dari 16.745.656 — mendekati kernel ROM refer
 | Wi-Fi tidak jalan | `wifi@1.0-service` perlu WifiOverlay RRO |
 | Audio mati | `audio@6.0` butuh `audio_policy_configuration.xml` format baru |
 | Kamera crash | Blob HAL1 vs framework Android 11 — cek `camera.provider@2.4` |
-| SIM tidak terdeteksi | RIL blob butuh `libcutils_shim` |
+| SIM tidak terdeteksi | Versi HAL radio di manifest lebih rendah dari yang didaftarkan libril (lihat Fase 10) |
 | Bluetooth gagal | Prebuilt `bluetooth@1.0-service-qti` vs `bluetooth.audio@2.0` |
 | lmkd tidak jalan | CONFIG_MEMCG belum enable di kernel (wajib jika in-kernel LMK dimatikan) |
 
@@ -1021,6 +1203,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 5 diverifikasi & diuji** (commit `e9d1daf`): cek coverage otomatis menemukan `drm@1.3-service.clearkey` tanpa entri `file_contexts` — AOSP hanya melabeli `drm@1.0-service`/`-lazy`, dan `.rc`-nya tak menyetel `seclabel`, jadi binernya berlabel `vendor_file` dan servis DRM jalan di domain `init`. Ditambal → 18/18 HAL service berlabel. Diukur juga alasan sebenarnya `SELINUX_IGNORE_NEVERALLOWS` masih wajib: ~1.500 pelanggaran, 626 dari `property.te` platform dan ratusan dari `sepolicy-legacy` QCOM, hanya 8 milik A37 (`timekeep_app.te:7`). Dicatat dua jebakan pengukuran: override flag harus SETELAH `include sepolicy-legacy` (yang memaksa `:= true`), dan artefak `sepolicy_neverallows` harus dihapus dulu karena `m selinux_policy` tidak membangunnya. |
 | 2 Agu 2026 | **Fase 3–4 diverifikasi & diuji** (commit `8276fea`): `m check-vintf-all` awalnya **gagal total** — `vendor.lineage.trust` dideklarasikan di `manifest.xml` sekaligus dibawa VINTF fragment paketnya, dan `HalManifest::shouldAdd` menolaknya sehingga **seluruh device manifest batal** ("No device HAL manifest"). Entri manual dihapus → **COMPATIBLE**. Diklarifikasi kenapa drm tidak ikut bentrok: fragment clearkey tanpa tag `<version>`. Improve: `IDisplayColorCalibration` + `IAdaptiveBacklight` ditambahkan ke livedisplay (paketnya tak bawa fragment; tanpa deklarasi `getService()` langsung null karena `PRODUCT_ENFORCE_VINTF_MANIFEST`), dipilih hanya yang terbukti register lewat node sysfs kernel A37. Cross-check: semua 26 `<hal>` punya penyedia. |
 | 2 Agu 2026 | **Fase 2 diverifikasi & diuji build**: `lunch` + `m nothing` (soong + kati ±20.700 makefile) + `m dtbToolOppo dtimage` semuanya lolos; dt.img 210.944 B dengan `oppoId: 15399` terisi, dan kernel yang dibangun build system memuat patch Fase 1. Tiga blocker Android 11 diperbaiki: `BUILD_BROKEN_PHONY_TARGETS` obsolete (dihapus), `libhidltransport`/`libhwbinder` visibility di `usb`+`lights` Android.bp (dihapus dari shared_libs), `BUILD_HOST_EXECUTABLE` obsolete di dtbtool (dikonversi ke `cc_binary_host`). Escape hatch `BUILD_BROKEN_USES_BUILD_COPY_HEADERS` dipakai untuk stack GPS. Koreksi: `TARGET_USES_LEGACY_WFD` ternyata tanpa konsumen. Temuan untuk fase lain: duplicate rule `libmm-omxcore.so` (device.mk vs A37-vendor.mk), `external/stlport` tidak diperlukan, `dtbtool.c` A37 kehilangan `O_TRUNC`. |
+| 3 Agu 2026 | **FASE 10 — debug di device sungguhan.** ROM booting sampai homescreen di percobaan pertama. 9 bug dari pengujian nyata diperbaiki (rincian di Fase 10). Yang terpenting: **akar ANR `com.android.phone`** ternyata `manifest.xml` mendeklarasikan `android.hardware.radio` versi 1.0 sedangkan libril mendaftarkan `@1.1::IRadio` — `registerAsServiceInternal` menolak karena `minorAtLeast` gagal, pendaftaran gagal senyap, lalu `RIL.java` blocking selamanya di `getService` V1_0. Juga: `IAdaptiveBacklight` tanpa impl memicu reboot watchdog 60 detik (analisis Fase 4 saya salah baca driver), notifikasi serial console butuh mematikan `SERIAL_MSM_HSL_CONSOLE` (bukan cuma hapus `console=`), Settings blank karena APEX tethering salah modul, `mm-pp-daemon` 99% CPU, `seclabel` palsu `time_daemon` (avc 605→68), RIL butuh `libril_shim` untuk `AudioSystem::setErrorCallback`, `time_daemon` exit 255 karena `capabilities` memangkas `CAP_SETGID` dari root, widevine crash-loop tiap 5 detik (protobuf lama, dibuang). Dua kesalahan metodologi saya dicatat di 10.6. |
 | 2 Agu 2026 | **Bersih-bersih `7a9d4eb`** (commit `675ae89`, build ke-4 exit 0): `CONFIG_FHANDLE` di-revert — tanpa konsumen di `system/`/`frameworks/` dan AOSP mewajibkannya mati di Q maupun R; ikut menghapus `EXPORTFS` yang di-`select`-nya. `CONFIG_DEBUG_SET_MODULE_RONX` dihapus — tidak pernah mendarat karena `depends on MODULES` sedangkan kernel monolitik. Dari 4 config `7a9d4eb`, tersisa `ENCRYPTED_KEYS` (efektif) dan `CRYPTO_SHA256` (redundan, dibiarkan). |
 
 ---
