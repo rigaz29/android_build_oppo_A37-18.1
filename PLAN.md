@@ -1132,6 +1132,62 @@ terlalu lebar untuk di-shim seperti `libril_shim`.
 tapi ia butuh protobuf lama yang sama — Widevine baru bisa hidup kalau blob
 `libprotobuf-cpp-lite.so` seangkatan ikut ditambahkan.
 
+### 10.12 `camera-provider-2-4` restart tiap 5 detik — kelas bug yang sama dengan 10.7
+
+Ditemukan saat triase ulang log, bukan dari laporan pengguna:
+
+```
+E HidlServiceManagement: Service android.hardware.camera.provider@2.4::ICameraProvider/legacy/0
+                         must be in VINTF manifest in order to register/get.
+E LegacySupport: Could not register service ... (-2147483648)
+```
+
+`device.mk:224-225` memasang **dua-duanya**: `@2.4-impl` (library passthrough) dan
+`@2.4-service` (service binderized). Manifest mendeklarasikan `passthrough`, sehingga
+service binderized-nya ditolak mendaftar, keluar, lalu di-restart init selamanya —
+65 restart dalam satu jendela log.
+
+Efek sampingnya ikut terjelaskan: 64 baris `libprocessgroup: AddTidToCgroup failed to
+write '2552'` ternyata memakai PID camera-provider yang sedang mati. Jadi error cgroup
+itu gejala, bukan bug terpisah.
+
+**Perbaikan:** transport → `hwbinder`. Yang perlu dipastikan sebelum mengubahnya:
+apakah service-nya masih bisa memuat HAL kamera kalau manifest tidak lagi bilang
+passthrough? Jawabannya ya —
+`defaultPassthroughServiceImplementation<ICameraProvider>("legacy/0")`
+(`camera/provider/2.4/default/service.cpp:49`) ujungnya memanggil
+`getRawServiceInternal(..., getStub=true)` (`LegacySupport.cpp:35`), dan `getStub`
+selalu menempuh jalur passthrough lepas dari transport di manifest. Yang berubah hanya
+pendaftarannya jadi berhasil, sehingga HAL kamera berjalan di prosesnya sendiri —
+jalur Treble normal, sama dengan ROM referensi (mereka @2.5).
+
+`m check-vintf-all`: COMPATIBLE.
+
+### 10.13 Denial SELinux: 66/66 permissive — bukan bug
+
+Sempat hampir masuk daftar prioritas sebelum saya cek flagnya. Semua 66 denial
+bertanda `permissive=1`, artinya aksesnya tetap berhasil dan denialnya hanya dicatat.
+Termasuk 26 milik `mm-qcamerad` ke `/proc/qcom_flash` (11×), `/proc/devinfo/f_camera`,
+dan `/proc/oppoVersion/prjVersion` — jadi flash kamera **tidak** rusak karenanya.
+
+Ini pekerjaan kebersihan policy (butuh `genfscon` + allow rule), baru relevan kalau
+nanti pindah ke enforcing.
+
+### 10.14 Blob IMS 64-bit di ROM 32-bit (belum dikerjakan)
+
+```
+E init: cannot execv('/system/vendor/bin/imsqmidaemon'): No such file or directory
+```
+
+Filenya ada (120.464 B). Yang tidak ada interpreternya: ketiga blob IMS
+(`imsqmidaemon`, `imsdatadaemon`, `imscmservice`) ber-ELF **64-bit** dengan interpreter
+`/system/bin/linker64`, sedangkan ROM ini `TARGET_ARCH := arm` / `armeabi-v7a` dan
+hanya punya `/system/bin/linker` 32-bit. Jadi ketiganya tidak akan pernah bisa
+dieksekusi — crash-loop 5 detik kedua setelah camera-provider.
+
+IMS/VoLTE memang tidak pernah hidup sejak awal. ROM referensi juga punya
+`service vendor.imsqmidaemon`, jadi kemungkinan mengidap loop yang sama.
+
 ### 10.10 `bluetooth.a2dp` dideklarasikan tanpa implementasi
 
 `IBluetoothAudioOffload` dideklarasikan `hwbinder` tapi `vendor/lib/hw` hanya punya
