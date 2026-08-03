@@ -15,8 +15,8 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `763716b` (port + fix build/VINTF/sepolicy/blob/init/compile) | ✅ Fase 2–9 — ROM ter-build |
-| `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `675ae89` (dari `lz4-backport` 70ef81d + 6 commit a12-prep + 3 commit verifikasi) | ✅ Fase 1 selesai, lolos build |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `d0b712d` (port + fix build/VINTF/sepolicy/blob/init/compile) | ✅ Fase 2–9 — ROM ter-build |
+| `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `43ff902` (+ audit & pemulihan kemampuan debug) | ✅ Fase 1 selesai, lolos build |
 | `rigaz29/rb-vendor_oppo_A37` | `lineage-18.1` @ `8349a48` (repo baru, dari `6a64435` + fix Fase 6) | ✅ Fase 6 selesai |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
 | `LineageOS/android_external_stlport` | `lineage-15.1` | ⬜ Cek apakah masih diperlukan |
@@ -858,6 +858,60 @@ berbeda.
 > **Belum diuji di hardware.** Build sukses membuktikan seluruh tree
 > ter-compile dan ter-package, bukan bahwa device boot. Langkah berikutnya
 > flash + kumpulkan log.
+
+### Audit kemampuan debug kernel (3 Agu 2026 — kernel `43ff902`, device `d0b712d`)
+
+#### Yang sudah benar: rantai ramoops utuh ujung ke ujung
+
+| Mata rantai | Bukti |
+|---|---|
+| Config | `PSTORE`, `PSTORE_RAM`, `PSTORE_CONSOLE`, `PSTORE_PMSG` semua `=y` |
+| Reservasi memori | DTS `msm8916-common-15399.dtsi:29-35` → `0x9ff00000` size `0x400000` |
+| Cocok cmdline | `ramoops.mem_address=0x9ff00000 ramoops.mem_size=0x400000` — identik |
+| Driver terima param | `fs/pstore/ram.c:43,60,65` `module_param` |
+| Android mount | `system/core/rootdir/init.rc:346` + chown/chmod `console-ramoops` |
+| **Recovery mount** | `bootable/recovery/etc/init.rc:58` |
+
+**Jalur penyelamat saat bootloop** (bekerja tanpa perubahan apa pun) — boot ke recovery:
+
+```bash
+cat /sys/fs/pstore/console-ramoops    # kernel log sebelum reboot/panic
+cat /sys/fs/pstore/pmsg-ramoops       # logcat terakhir (logd → /dev/pmsg0)
+```
+
+#### 3 parameter cmdline yang ternyata tidak melakukan apa pun — diperbaiki
+
+| Parameter | Masalah | Perbaikan |
+|---|---|---|
+| `console=ttyHSL0` | `CONFIG_SERIAL_MSM_HSL` mati → device tidak pernah ada. Node DTS `blsp1_uart2` juga **dikomentari**. Tidak ada serial console sama sekali | Nyalakan `SERIAL_MSM_HSL(_CONSOLE)` + un-comment node. DTB terverifikasi `status = "ok"`, alias `serial0` |
+| `earlyprintk` | arm64 butuh argumen — `early_printk.c:143` cetak *"No earlyprintk arguments passed"* lalu return | → `earlyprintk=msm_hsl_uart,0x78b0000` (`msm_hsl_uart` di `earlycon_match`, alamat dari `msm8916.dtsi:485-487`) |
+| `msm_rtb.filter=0x237` | `CONFIG_MSM_RTB` dimatikan `e8bab6d` → diabaikan diam-diam | Nyalakan `MSM_RTB` + `MSM_RTB_SEPARATE_CPUS`. Node `qcom,msm-rtb` sudah ada (`msm8916.dtsi:829`, `rtb-size 0x100000` = 1 MB) |
+
+#### 2 fasilitas dipulihkan untuk fase bring-up
+
+Keduanya dimatikan commit `e8bab6d` ("Optimize"), padahal justru dibutuhkan sekarang:
+
+- **`CONFIG_IPC_LOGGING`** — ring buffer log subsistem QCOM (QMI/RIL/SMD)
+- **`CONFIG_DYNAMIC_DEBUG`** — nyalakan `pr_debug` saat runtime lewat
+  `/sys/kernel/debug/dynamic_debug/control`, tanpa rebuild kernel
+
+Masih mati dan **sengaja dibiarkan**: `DEBUG_INFO` (tidak ada gdb/crash offline;
+`KALLSYMS` sudah cukup untuk `fungsi+offset`), `KALLSYMS_ALL`, `SCHED_DEBUG`,
+`PROFILING`, `MSM_BOOT_STATS`, `MSM_TZ_LOG`.
+
+#### Risiko yang perlu disadari
+
+`MSM_WATCHDOG_V2=y` + `PANIC_TIMEOUT=5`. Untuk **panic**, ini justru ideal — ramoops
+menulis lalu reboot otomatis. Untuk **hang**, watchdog bisa mereset keras dan memotong
+ekor log; kalau perlu, tambahkan `msm_watchdog_v2.enable=0` ke cmdline agar device
+menggantung diam sehingga bisa diperiksa.
+
+#### Hasil build ulang
+
+Kernel `Image` 19.743.544 B (naik dari 16.745.656 — mendekati kernel ROM referensi
+20.105.976 B, menguatkan dugaan mereka juga menyalakan opsi debug ini). 5 warning,
+0 error. `mka bacon` ulang: **exit 0 dalam 6:21** →
+`lineage-18.1-20260803-UNOFFICIAL-rigaz29-A37.zip`, `boot.img` 19,9 MB.
 5. [ ] Kumpulkan log: `logcat -b all`, `dmesg`, `cat /proc/last_kmsg`
 6. [ ] Identifikasi HAL yang gagal register → perbaiki manifest.xml / device.mk
 7. [ ] Iterasi sampai stabil
@@ -942,6 +996,7 @@ Hal-hal berikut sudah benar di 17.1 dan tidak perlu dimodifikasi
 | 2 Agu 2026 | **Fase 3+4 selesai**: device.mk + manifest.xml di-port dan diverifikasi. 3 paket dihapus (tidak ada di LOS 18.1: tethering.inprocess, WifiOverlay, TetheringConfigOverlay). USB VINTF gap di-fix. |
 | 2 Agu 2026 | **Verifikasi kernel penuh** dari source tree `/root/los18`: tidak perlu backport source code. 4 defconfig baru ditambahkan (FHANDLE, ENCRYPTED_KEYS, CRYPTO_SHA256, DEBUG_SET_MODULE_RONX). Commit `7a9d4eb`. |
 | 2 Agu 2026 | **Kernel diuji build sungguhan** (commit `35e50af`) (3 build, semua exit 0) dengan toolchain LOS 18.1 (GCC 4.9 + lld host). Audit terhadap `android-base.config` R: 187/250 terpenuhi, tidak ada yang boot-kritis. Ditemukan & diperbaiki bug `CONFIG_STACKPROTECTOR` (symbol tidak valid di 3.10 → stack protector tidak pernah aktif). Ditambah 15 opsi pengerasan (IP_MULTICAST, INET_UDP_DIAG, VETH, TASKSTATS, MEMCG_SWAP, UTS_NS/PID_NS, IKCONFIG, dll). Koreksi atas `7a9d4eb`: DEBUG_SET_MODULE_RONX tidak mendarat (butuh CONFIG_MODULES), CRYPTO_SHA256 redundan, FHANDLE rasionalnya keliru & AOSP mewajibkan mati. Koreksi atas `51b5a87`: bukan no-op config (default loop count = 8), yang membuatnya tak berdampak adalah TARGET_FLATTEN_APEX default `true` di R. |
+| 3 Agu 2026 | **Audit kemampuan debug kernel** (kernel `43ff902`, device `d0b712d`). Rantai ramoops terverifikasi utuh ujung ke ujung — config, reservasi DTS `0x9ff00000`, cmdline, mount oleh Android **dan recovery** — jadi bootloop tetap bisa didiagnosis lewat `/sys/fs/pstore/console-ramoops`. Ditemukan 3 parameter cmdline yang tidak melakukan apa pun karena config-nya mati: `console=ttyHSL0` (`SERIAL_MSM_HSL` mati + node DTS dikomentari → tidak ada serial console sama sekali), `earlyprintk` telanjang (arm64 butuh argumen), dan `msm_rtb.filter` (`MSM_RTB` mati). Ketiganya diperbaiki. `IPC_LOGGING` + `DYNAMIC_DEBUG` dipulihkan untuk fase bring-up. Rebuild: kernel 19,7 MB, `mka bacon` exit 0 dalam 6:21. |
 | 2 Agu 2026 | **FASE 9: BUILD PERTAMA BERHASIL** (commit `763716b`). `mka bacon -j12` tuntas dalam 54:31 → `lineage-18.1-20260802-UNOFFICIAL-rigaz29-A37.zip` 484 MB. Dua blocker compile diperbaiki, keduanya di device tree: `libinit_msm8916` (fmtlib tidak di include path setelah `result.h` memakainya di Android 11, plus `property_set` dihapus dari `property_service.h` — penggantinya tidak diekspor header dan `SetProperty` salah karena `vendor_load_properties` berjalan sebelum `StartPropertyService`) dan `libshim_camera` (konstruktor `AudioSource` ganti parameter pertama dari `audio_source_t` ke `const audio_attributes_t*`; sekalian diperbaiki bug ABI lama yang melupakan `this`). boot.img hasil build tervalidasi terhadap ROM 18.1 A37 yang beredar: geometri identik dan `dt_size` sama persis 210.944 byte. Belum diuji di hardware. |
 | 2 Agu 2026 | **Fase 8 dikerjakan & diuji**: `A37.xml` ditulis ke repo manifest (sebelumnya cuma berisi PLAN.md) dan dipasang di `.repo/local_manifests/`. Keempat `project@revision` diverifikasi resolve di remote dengan SHA yang cocok persis dengan tree kerja. `device/qcom/sepolicy-legacy` sengaja tidak dideklarasikan karena sudah disediakan `snippets/lineage.xml:64` lengkap dengan revision `lineage-18.1-legacy`. `external/stlport` terbukti tidak diperlukan dan dihapus dari `lineage.dependencies` (`a2b976b`). Ditemukan: tree lama butuh `repo sync --force-sync vendor/oppo` sekali karena nama project vendor berubah — sudah didokumentasikan di komentar manifest. |
 | 2 Agu 2026 | **Fase 7 dikerjakan & diuji** (commit `c8dc9ab`) memakai `host_init_verifier`, validator init bawaan Android 11. Dua bug: `load_system_props` deprecated bikin build gagal (dihapus; di runtime pun sudah no-op), dan `/firmware` tidak pernah berlabel `firmware_file` karena vfat tanpa xattr jatuh ke `genfscon vfat -> vfat` sementara policy device memberi izin ke `firmware_file` — ditambahkan opsi mount `context=`. Terverifikasi benar: import path, `ueventd` di `/vendor/ueventd.rc`, `init.recovery.qcom.rc` di `/`, `mount_all`/`swapon_all`, dan 16 service menunjuk biner yang ada. Klaim rencana soal penamaan `ueventd.qcom.rc` dikoreksi: yang berubah nama modul, bukan file terpasang. Cek label service sempat false-positive; dikoreksi dengan membaca xattr asli dari image ROM referensi. |
