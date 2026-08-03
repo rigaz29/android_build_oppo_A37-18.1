@@ -1233,10 +1233,68 @@ sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya dit
 
 | Item | Status |
 |---|---|
-| `SIM_COUNT` tidak diset di BoardConfig | Belum diputuskan — lihat catatan di bawah |
-| ~68 denial avc sisa (mayoritas domain `mm`) | Belum ditelusuri |
-| Deteksi SIM & panggilan | Belum diuji — device diuji tanpa SIM terpasang |
+| Crash SystemUI `AssistManager` | Bug hulu, perbaikan 1 baris di `frameworks/base` — menunggu keputusan fork platform |
+| Tes fungsional: kamera, audio, panggilan, BT, GPS | Belum satu pun dicoba dipakai |
+| Ledakan `SET_BROADCAST_CONFIG` saat boot | ~110 permintaan gagal lalu berhenti; berisik, tidak merusak |
+| 66 denial avc | Semuanya `permissive=1` — kebersihan policy, bukan bug (10.13) |
 | Penyebab reboot-ke-recovery (10.8) | Dugaan RescueParty belum dibuktikan dari pstore/BCB |
+| `WITH_ADB_INSECURE` | Wajib dibuang sebelum rilis publik |
+
+**Sudah tertutup:** `SIM_COUNT` (terbukti benar apa adanya, lihat di bawah).
+
+### 10.15 `ims.apk` menjatuhkan `com.android.phone` 45 kali
+
+Menyusul 10.14. Setelah ketiga daemon IMS dibuang, APK-nya sendiri masih terpasang dan
+crash berulang:
+
+```
+E AndroidRuntime: Process: com.android.phone
+FATAL EXCEPTION: main
+java.lang.IllegalAccessError: Method 'void java.lang.System.arraycopy(byte[], int,
+  byte[], int, int)' is inaccessible to class 'org.codeaurora.ims.ImsSenderRxr'
+    at org.codeaurora.ims.ImsService.onCreate(ImsService.java:188)
+```
+
+Overload itu **`private`** di Android 11 —
+`libcore/ojluni/src/main/java/java/lang/System.java:515`, dengan komentar "Do not remove
+or change the signature" karena disimpan hanya untuk jalur intrinsik runtime. APK ini
+dibangun untuk Android 5.1 saat masih bisa diakses. Tidak bisa diperbaiki tanpa
+mengompilasi ulang APK-nya.
+
+`ImsService`-nya berjalan **di dalam** proses `com.android.phone`, jadi tiap crash
+menjatuhkan telepon, bukan sekadar dirinya sendiri. Dibuang. Library, `imscmlibrary.jar`,
+dan `imscm.xml` dibiarkan — inert setelah APK-nya hilang.
+
+### 10.16 PowerHAL `boostpulse` Permission denied (73×) — DAC, bukan SELinux
+
+```
+E PowerHAL: open /sys/devices/system/cpu/cpufreq/interactive/boostpulse: Permission denied
+```
+
+`vendor.power-hal-1-0` berjalan sebagai `user system`, sedangkan kernel membuat node itu
+milik root:
+
+| Node | Deklarasi kernel | Akibat |
+|---|---|---|
+| `boostpulse` | `__ATTR(boostpulse, 0200, ...)` `cpufreq_interactive.c:1409` | write-only, hanya root |
+| `boost` | `gov_sys_pol_attr_rw` → 0644 | hanya root yang bisa tulis |
+
+Jadi `open()` ditolak **sebelum** SELinux ikut bicara. Sisi SELinux justru sudah benar
+sejak awal (`sepolicy/hal_power_default.te` mengizinkan
+`sysfs_devices_system_cpu:file { open write }`) — kalau tidak dicek, mudah salah
+menuduhnya.
+
+**Perbaikan:** `chown system system` + `chmod` di `init.qcom.power.rc`, ditaruh setelah
+`scaling_governor` diset `interactive` karena direktori tunables-nya baru muncul saat
+governor itu aktif.
+
+**Koreksi cakupan dampak:** saya sempat menyebut ini "touch boost mati". Salah —
+`cpu-boost.c:499` mendaftarkan input handler sendiri di kernel dengan `input_boost_ms`
+120 ms dari rc yang sama, jadi respons sentuh tidak pernah terpengaruh. Yang benar-benar
+hilang: boost untuk interaksi **tanpa** sentuhan (rotasi layar, animasi window lewat
+`POWER_HINT_INTERACTION`) dan sustained boost saat peluncuran aplikasi.
+
+Terverifikasi di device: `--w--w---- system system`, log `PowerHAL` bersih.
 
 ### Terverifikasi di device (build 20260803_140427)
 
@@ -1251,17 +1309,36 @@ DM,FC Y android.hardware.radio.deprecated@1.0::IOemHook/slot1  436
 DM,FC Y android.hardware.radio@1.1::ISap/slot1       436
 ```
 
-Dua rild masing-masing melayani satu slot, persis seperti dugaan di catatan `SIM_COUNT`
-di bawah. ANR `com.android.phone` hilang, crash-loop widevine hilang.
+Dua rild masing-masing melayani satu slot. ANR `com.android.phone` hilang, crash-loop
+widevine hilang.
 
-**Catatan `SIM_COUNT`:** device ini DSDS (`persist.radio.multisim.config=dsds`, ada
-`ril-daemon` + `ril-daemon2`). `SIM_COUNT` tidak diset di mana pun, jadi libril dibangun
-tanpa `ANDROID_MULTI_SIM` → `RIL_RequestFunc` bersignature 4 argumen, sedangkan blob
-QCRIL kemungkinan mengharap 5 (`socket_id`). Di sisi lain, menyetel `SIM_COUNT := 2`
-membuat **tiap** rild mendaftarkan slot1 *dan* slot2 (`ril_service.cpp:8701-8716`),
-sehingga dua proses rild akan saling menimpa. Karena dengan konfigurasi sekarang rild1
-mendaftar `slot1` dan rild2 mendaftar `slot2` dengan rapi, ini dibiarkan dulu dan diuji
-di device: kalau SIM terdeteksi dan berfungsi, tidak ada yang perlu diubah.
+### RIL terbukti sampai ke modem — `SIM_COUNT` ditutup
+
+`lshal` hanya membuktikan pendaftaran HIDL, bukan bahwa blob-nya benar-benar bicara
+dengan modem. Buktinya baru datang dari `logcat -b radio`, **tanpa SIM terpasang**:
+
+```
+[0155]< RIL_REQUEST_GET_CELL_INFO_LIST [CellInfoGsm:{mRegistered=NO ...
+   CellIdentityGsm:{ mLac=4923 mCid=42074 mArfcn=20 mMcc=510 mMnc=10 ...}
+   CellSignalStrengthGsm: rssi=-113 ...}] [PHONE0]
+```
+
+MCC 510 / MNC 10 = Telkomsel, Indonesia. Modem memindai dan menemukan menara nyata.
+Ditambah `GET_RADIO_CAPABILITY` yang dijawab kedua slot (`mLogicModemId` 0 dan 1) dan
+`UNSOL_RESPONSE_NETWORK_STATE_CHANGED` yang datang berkala.
+
+**Kekhawatiran `SIM_COUNT` tidak terbukti.** Dugaan lama: karena `SIM_COUNT` tidak diset,
+libril dibangun tanpa `ANDROID_MULTI_SIM` sehingga `RIL_RequestFunc` bersignature 4
+argumen sedangkan blob QCRIL mengharap 5 (`socket_id`). Kalau ABI-nya memang meleset,
+respons berstruktur seperti di atas akan berisi sampah — bukan MCC/MNC/LAC/CID yang
+koheren. Konfigurasi sekarang (dua rild, masing-masing satu slot) **benar apa adanya**;
+menyetel `SIM_COUNT := 2` justru akan membuat tiap rild mendaftarkan slot1 *dan* slot2
+(`ril_service.cpp:8701-8716`) sehingga keduanya saling menimpa.
+
+Sisa keterbatasan blob 5.1 yang tidak bisa diperbaiki dari sisi kita:
+`RIL_REQUEST_SET_UNSOLICITED_RESPONSE_FILTER` dan `RIL_REQUEST_SEND_DEVICE_STATE`
+dijawab `REQUEST_NOT_SUPPORTED` — modem tidak diberi tahu saat device idle, sedikit
+boros baterai.
 
 ### Masalah umum yang diantisipasi
 
