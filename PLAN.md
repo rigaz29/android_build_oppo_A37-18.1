@@ -1540,6 +1540,79 @@ dihidupkan lagi lewat cmdline tanpa rebuild kernel.
 `IPC_LOGGING` dan `DYNAMIC_DEBUG` sengaja dibiarkan — biayanya jauh di bawah RTB dan
 keduanya berguna kalau ada masalah RIL lagi.
 
+### 10.20 Triase log boot lengkap — garis dasar bersih
+
+Sepanjang Fase 10 triase dilakukan ad hoc dengan grep sekali pakai. Diformalkan jadi
+`tools/triage.sh` (12 bagian; tiap bagian pernah menangkap bug sungguhan di sesi ini,
+bukan daftar teoretis).
+
+**Prasyarat yang sebelumnya menghambat berulang kali:** beberapa analisis buntu karena
+log diambil terlalu lambat — ring buffer logcat sudah berputar melewati masa boot,
+sehingga tidak ada satu pun penanda `boot_progress_`. Perbaikannya sekali dan permanen:
+
+```
+adb shell setprop persist.logd.size 16M
+```
+
+Script mendeteksi kondisi ini dan mencetak solusinya, supaya tidak terulang.
+
+**Hasil pada build `20260803_183338`:**
+
+| Kategori | Hasil |
+|---|---|
+| Service crash-loop | bersih |
+| Crash Java / ANR / native / watchdog | bersih |
+| Biner tidak bisa exec | bersih |
+| SELinux | 66 denial, **semuanya permissive** (0 enforcing) |
+| Kernel → userspace | **< 2,2 detik** |
+| zygote preload → `Boot is finished` | **26,9 detik** |
+| `TotalBootTime` | 22,2 detik |
+
+Batas kernel disimpulkan dari pesan `init` pertama di `[2.225400]`; pesan kernel
+sebelumnya sudah tertimpa karena ring buffer `dmesg` juga berputar. Jadi angka pastinya
+tidak terbaca, tapi batas atasnya cukup untuk menyimpulkan kernel bukan hambatan
+setelah 10.19.
+
+#### Dua temuan nyata, keduanya diperbaiki
+
+**`android.frameworks.cameraservice.service@2.1` tidak dideklarasikan di mana pun.**
+Jalur HIDL agar proses vendor bisa memakai kamera; yang mendaftarkannya justru
+`cameraserver` sendiri (`CameraService.cpp:174`). Manifest framework build ini tidak
+memuatnya sama sekali (nol kemunculan, tidak ada fragment), jadi harus dideklarasikan di
+manifest device — ROM referensi juga begitu.
+
+> **Jebakan yang nyaris menjerat:** pesan errornya sendiri menyesatkan.
+> `CameraService.cpp:176` mencetak `Failed to register default
+> android.frameworks.cameraservice.service@1.0` — string usang yang tidak pernah
+> diperbarui saat interface naik versi. Yang benar `@2.1`
+> (`HidlCameraService.h:45` memakai `V2_1::ICameraService`). Menuruti pesan errornya akan
+> menghasilkan kegagalan `minorAtLeast` yang persis sama dengan IRadio 1.0 vs 1.1 di 10.7:
+> dideklarasikan, tetap ditolak, dan terlihat seolah sudah beres.
+
+Terverifikasi di device: `lshal` memperlihatkan `@2.0` dan `@2.1` terdaftar di PID 410
+(`cameraserver`).
+
+**`libwvdrmengine.so` terbukti tidak bisa dimuat.** Waktu kedua service HIDL widevine
+dibuang (10.9), plugin legacy ini ditahan dengan alasan mungkin masih bisa lewat instance
+`default`. Log membantahnya:
+
+```
+E android.hardware.drm@1.0-impl: Failed to lookup symbol createDrmFactory in library
+  /vendor/lib/mediadrm/libwvdrmengine.so: dlopen failed: cannot locate symbol
+  "_ZN6google8protobuf8internal13empty_string_E"
+```
+
+Simbol protobuf lama yang sama. Dibuang.
+
+#### Diperiksa dan ternyata bukan bug
+
+| Pesan | Penjelasan |
+|---|---|
+| `RILQ: qmi_ril_peripheral_mng_init: Failed to register for modem` | didahului `PerMgrLib: Peripheral manager is not supported on this device` — blob menjajaki fitur yang tidak ada di msm8916 lalu lanjut |
+| `LowMemDetector: Failed to register psi trigger` | PSI baru ada di kernel 4.20; ini 3.10. `lmkd` jatuh ke vmpressure, persis seperti analisis Fase 1 |
+| `libjni_latinimegoogle.so` not found | library khusus GApps; keyboard AOSP menjajakinya lalu lanjut |
+| supplicant "trying to start it as a lazy HAL" | informasional |
+
 ### Masalah umum yang diantisipasi
 
 | Gejala | Kemungkinan Penyebab |
