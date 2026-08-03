@@ -1235,7 +1235,7 @@ sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya dit
 |---|---|
 | Long-press ikon Quick Settings mengunci layar | **Tidak diperbaiki** — bug hulu LineageOS 18.1, penyebab & perbaikannya sudah dipetakan di 10.17 |
 | Tes fungsional: kamera, audio, panggilan, BT, GPS | Belum satu pun dicoba dipakai |
-| Boot pertama setelah flash lambat | **Bukan bug** — perilaku `dex2oat` yang diharapkan, sengaja tidak diubah (10.18) |
+| ~~Boot pertama setelah flash lambat~~ | **Selesai** — precompile penuh + RTB/earlyprintk dimatikan; terkonfirmasi cepat di device (10.18, 10.19) |
 | Ledakan `SET_BROADCAST_CONFIG` saat boot | ~110 permintaan gagal lalu berhenti; berisik, tidak merusak |
 | 66 denial avc | Semuanya `permissive=1` — kebersihan policy, bukan bug (10.13) |
 | Penyebab reboot-ke-recovery (10.8) | Dugaan RescueParty belum dibuktikan dari pstore/BCB |
@@ -1486,20 +1486,59 @@ Ruang yang tersedia ternyata longgar, di luar dugaan awal:
 | Terpakai | 1088 MiB |
 | Sisa | **1639 MiB (60% menganggur)** |
 
-Jadi mematikan kedua flag itu (`:= false`) secara teknis muat, dengan perkiraan kasar
-pertambahan 300-800 MB. **Keputusan: tidak diubah** — ini biaya sekali per flash, dan
-pertambahan ukuran ZIP menyulitkan distribusi.
+Semula diputuskan **tidak diubah** dengan alasan pertambahan ukuran ZIP. Keputusan itu
+kemudian **dibalik** atas permintaan, dan ternyata alasannya memang tidak kuat.
 
-Sisa pertanyaan yang belum diukur: apakah boot **kedua** masih lebih lambat dari 17.1.
-Kalau ya, tersangkanya bukan dex2oat melainkan `CONFIG_MSM_RTB` + `earlyprintk` yang
-dinyalakan di fase audit debuggability (Fase 9). Cara memisahkannya satu perintah:
+#### Precompile penuh diterapkan — perkiraan biayanya meleset jauh
 
-```
-adb shell dmesg | findstr /C:"Freeing unused kernel"
+```make
+WITH_DEXPREOPT_BOOT_IMG_AND_SYSTEM_SERVER_ONLY := false
+DONT_DEXPREOPT_PREBUILTS := false
 ```
 
-Angka dalam kurung siku = detik yang dihabiskan kernel sebelum menyerahkan ke userspace.
-Di msm8916 sehat biasanya di bawah 5 detik.
+| | Perkiraan saya | Kenyataan |
+|---|---|---|
+| Pertambahan system | 300-800 MB | **+38 MiB** (1088 → 1126) |
+| Total direktori `oat` | — | 50 MiB |
+| Waktu build | 20-40 menit | **6:03** |
+
+Sebabnya ada di `out/soong/dexpreopt.config`: `DefaultCompilerFilter` kosong, sehingga
+aplikasi memakai filter **`quicken`** — bytecode dex dioptimalkan dan disimpan di vdex,
+tanpa menghasilkan kode native. Perkiraan saya mengasumsikan filter `speed` yang
+mengompilasi penuh; itu kelas biaya yang sama sekali berbeda.
+
+Bukti flag berlaku: `OnlyPreoptBootImageAndSystemServer: False`, dan odex aplikasi ada
+(`Settings.odex`, `TrebuchetQuickStep.odex`, 78 file di `app`/`priv-app`).
+
+**Hasil di device: boot cepat.** Terkonfirmasi.
+
+Catatan harapan: `quicken` bukan kompilasi penuh, jadi performa harian kurang lebih sama —
+aplikasi tetap mengandalkan JIT dan Android tetap menjalankan dexopt latar belakang
+berbasis profil. Yang berubah adalah hilangnya kompilasi massal saat boot pertama. Kalau
+suatu saat mau lebih jauh, `PRODUCT_DEX_PREOPT_DEFAULT_COMPILER_FILTER := speed` barulah
+mendatangkan pertambahan ratusan MB yang tadinya saya kira terjadi di sini.
+
+### 10.19 `MSM_RTB` + `earlyprintk` dimatikan — alat bring-up yang sudah tidak sepadan
+
+Dinyalakan di Fase 9 untuk mendiagnosis bootloop, dimatikan setelah bring-up tenang:
+
+| Yang dimatikan | Alasan |
+|---|---|
+| `CONFIG_MSM_RTB`, `CONFIG_MSM_RTB_SEPARATE_CPUS` | mencatat tiap akses register driver, IRQ, dan context switch — biayanya melekat di semua driver sepanjang waktu |
+| `msm_rtb.filter=0x237` di cmdline | percuma tanpa `CONFIG_MSM_RTB`; persis jenis parameter mati yang ditemukan di audit Fase 9 |
+| `earlyprintk=msm_hsl_uart,0x78b0000` | tiap pesan boot awal dikirim lewat UART 115200 baud secara **memblokir** |
+
+**Kemampuan diagnosis tidak hilang:** rantai ramoops (`PSTORE_CONSOLE`, `PSTORE_PMSG`,
+`PSTORE_RAM` + `ramoops.*` di cmdline) utuh, terverifikasi di `boot.img` hasil build.
+Yang hilang hanya satu kasus sempit — device mati **sebelum** pstore siap; untuk itu
+`earlyprintk` tinggal dikembalikan sementara.
+
+`CONFIG_SERIAL_MSM_HSL` tetap menyala dengan `SERIAL_MSM_HSL_CONSOLE` tetap mati, jadi
+notifikasi "Serial console enabled" (10.2) tidak kembali, tapi console serial bisa
+dihidupkan lagi lewat cmdline tanpa rebuild kernel.
+
+`IPC_LOGGING` dan `DYNAMIC_DEBUG` sengaja dibiarkan — biayanya jauh di bawah RTB dan
+keduanya berguna kalau ada masalah RIL lagi.
 
 ### Masalah umum yang diantisipasi
 
