@@ -15,7 +15,7 @@
 
 | Repo | Branch | Status |
 |---|---|---|
-| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `d0b712d` (port + fix build/VINTF/sepolicy/blob/init/compile) | ✅ Fase 2–9 — ROM ter-build |
+| `rigaz29/rb_device_oppo_A37` | `lineage-18.1` @ `4a58018` (port + fix build/VINTF/sepolicy/blob/init/compile) | ✅ Fase 2–9 — ROM ter-build |
 | `rigaz29/kernel_oppo_msm8939` | `lineage-18.1` @ `43ff902` (+ audit & pemulihan kemampuan debug) | ✅ Fase 1 selesai, lolos build |
 | `rigaz29/rb-vendor_oppo_A37` | `lineage-18.1` @ `8349a48` (repo baru, dari `6a64435` + fix Fase 6) | ✅ Fase 6 selesai |
 | `LineageOS/android_hardware_sony_timekeep` | `lineage-18.1` | ⬜ Cek ketersediaan |
@@ -858,6 +858,23 @@ berbeda.
 > **Belum diuji di hardware.** Build sukses membuktikan seluruh tree
 > ter-compile dan ter-package, bukan bahwa device boot. Langkah berikutnya
 > flash + kumpulkan log.
+
+### Nama build kini bertimestamp (commit `4a58018`)
+
+Dua build pada hari yang sama menghasilkan nama file identik, dan yang kedua
+**menimpa yang pertama**. Ini terjadi sungguhan: build 3 Agu menulis ke inode yang
+sama dengan build 2 Agu, sehingga ROM lama beserta checksum yang sudah dibagikan
+menjadi tidak valid tanpa jejak.
+
+LineageOS sudah punya sakelarnya — `vendor/lineage/config/common.mk:270` memilih
+`date -u +%Y%m%d_%H%M%S` bila `LINEAGE_VERSION_APPEND_TIME_OF_DAY := true`.
+Disetel di `lineage_A37.mk` **sebelum** baris `inherit common_full_phone.mk`, karena
+`inherit-product` mengevaluasi berkasnya saat itu juga.
+
+```
+sebelum : lineage-18.1-20260803-UNOFFICIAL-rigaz29-A37.zip
+sesudah : lineage-18.1-20260803_005652-UNOFFICIAL-rigaz29-A37.zip
+```
 
 ### Audit kemampuan debug kernel (3 Agu 2026 — kernel `43ff902`, device `d0b712d`)
 
