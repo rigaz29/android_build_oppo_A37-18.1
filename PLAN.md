@@ -1051,16 +1051,40 @@ sekaligus memenuhi permintaan 1.0 (`minorAtLeast` searah), dan `ISap` juga `V1_1
 
 **Bukan** akibat perbaikan 10.5 — dihitung: 62 restart sebelum, 65 sesudah.
 
-**Penyebab sebenarnya** (dari `QC-time-services: Error changing gid:-1`): service
-dideklarasikan `user root` / `group root` **plus** `capabilities SYS_TIME`. Baris
-`capabilities` memangkas bounding set jadi hanya `CAP_SYS_TIME`
-(`capabilities.cpp:180-203` → `DropBoundingSet`), sehingga proses root pun kehilangan
-`CAP_SETGID`, dan `setgid()` gagal EPERM lalu binernya `exit(-1)`.
+**Penyebab** (dari `QC-time-services: Error changing gid:-1`): baris `capabilities
+SYS_TIME` memangkas bounding set jadi hanya `CAP_SYS_TIME` (`capabilities.cpp:180-203`
+→ `DropBoundingSet`), sehingga proses root pun kehilangan `CAP_SETGID`, dan `setgid()`
+gagal EPERM lalu binernya `exit(-1)`.
 
-**Perbaikan:** `user system` / `group system`. Dengan begitu `setgid`/`setuid` ke
-`AID_SYSTEM` jadi no-op yang lolos tanpa `CAP_SETGID`, sementara `CAP_SYS_TIME` tetap
-terbawa lewat ambient set. Konsisten dengan `mkdir /data/time/ 0700 system system` di
-file yang sama.
+**Percobaan pertama gagal.** Saya ganti ke `user system` / `group system` dengan asumsi
+daemon-nya setgid ke `AID_SYSTEM`. Setelah flash, `Error changing gid:-1` **masih
+muncul** — asumsinya salah.
+
+**Gid tujuan yang sebenarnya** didapat dengan membongkar `.text` binernya. Karena
+binernya stripped dan kodenya Thumb-2, disassembler biasa menghasilkan sampah; jalan
+yang berhasil adalah memetakan stub PLT ke relokasi `R_ARM_JUMP_SLOT`, lalu memindai
+seluruh `.text` per 2 byte untuk instruksi BL/BLX Thumb yang menuju stub itu:
+
+```
+0x1b3c  movw r0, #3004   ; F640 30BC  -> setgid(AID_NET_RAW)
+0x1b4e  mov.w r0, #1000  ; F44F 707A  -> setuid(AID_SYSTEM)
+```
+
+`AID_NET_RAW` = 3004 (`android_filesystem_config.h:157`). Jadi baik `root:root` (gid 0)
+maupun `system:system` (gid 1000) sama-sama gagal — keduanya bukan 3004, dan
+`setgid()` hanya lolos tanpa `CAP_SETGID` kalau gid tujuan sama dengan gid
+nyata/efektif/saved.
+
+**Perbaikan:** `user system` / `group net_raw system`. `setgid(3004)` dan `setuid(1000)`
+sama-sama jadi no-op yang lolos; karena uid tidak pernah berpindah dari/ke root,
+`CAP_SYS_TIME` tetap terbawa lewat ambient set sehingga `settimeofday()` tetap bisa
+dipakai. `net_raw` memang yang dibutuhkan — daemon ini bicara ke modem lewat socket
+`AF_MSM_IPC`, sesuai `allowxperm msm_sock_ipc_ioctls` di
+`sepolicy-legacy/common/time_daemon.te`.
+
+**Pelajaran:** untuk blob tertutup, jangan menebak konstanta dari nama fungsinya. Dua
+build terbuang karena saya menyimpulkan "setgid" berarti `AID_SYSTEM` dari konteks
+`mkdir /data/time/ 0700 system system` di file yang sama.
 
 ### 10.9 Widevine crash-loop tiap 5 detik
 
@@ -1105,6 +1129,23 @@ sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya dit
 |---|---|
 | `SIM_COUNT` tidak diset di BoardConfig | Belum diputuskan — lihat catatan di bawah |
 | ~68 denial avc sisa (mayoritas domain `mm`) | Belum ditelusuri |
+| Deteksi SIM & panggilan | Belum diuji — device diuji tanpa SIM terpasang |
+
+### Terverifikasi di device (build 20260803_140427)
+
+`lshal` memperlihatkan RIL terdaftar penuh setelah perbaikan 10.7:
+
+```
+DM,FC Y android.hardware.radio@1.0::IRadio/slot1     436
+DM,FC Y android.hardware.radio@1.1::IRadio/slot1     436
+DM,FC Y android.hardware.radio@1.0::IRadio/slot2     397
+DM,FC Y android.hardware.radio@1.1::IRadio/slot2     397
+DM,FC Y android.hardware.radio.deprecated@1.0::IOemHook/slot1  436
+DM,FC Y android.hardware.radio@1.1::ISap/slot1       436
+```
+
+Dua rild masing-masing melayani satu slot, persis seperti dugaan di catatan `SIM_COUNT`
+di bawah. ANR `com.android.phone` hilang, crash-loop widevine hilang.
 
 **Catatan `SIM_COUNT`:** device ini DSDS (`persist.radio.multisim.config=dsds`, ada
 `ril-daemon` + `ril-daemon2`). `SIM_COUNT` tidak diset di mana pun, jadi libril dibangun
