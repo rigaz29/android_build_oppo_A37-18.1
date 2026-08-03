@@ -1173,7 +1173,7 @@ dan `/proc/oppoVersion/prjVersion` — jadi flash kamera **tidak** rusak karenan
 Ini pekerjaan kebersihan policy (butuh `genfscon` + allow rule), baru relevan kalau
 nanti pindah ke enforcing.
 
-### 10.14 Blob IMS 64-bit di ROM 32-bit (belum dikerjakan)
+### 10.14 Blob IMS 64-bit di ROM 32-bit
 
 ```
 E init: cannot execv('/system/vendor/bin/imsqmidaemon'): No such file or directory
@@ -1187,6 +1187,29 @@ dieksekusi — crash-loop 5 detik kedua setelah camera-provider.
 
 IMS/VoLTE memang tidak pernah hidup sejak awal. ROM referensi juga punya
 `service vendor.imsqmidaemon`, jadi kemungkinan mengidap loop yang sama.
+
+**Audit sebelum menghapus** — dan hasilnya mempersempit cakupan kerjanya:
+
+| Yang diperiksa | Hasil |
+|---|---|
+| Biner 64-bit di seluruh ROM | **tepat 3**, ketiganya IMS. Tidak ada yang lain. |
+| 15 library `lib-ims*`/`libims*_jni` | semuanya **32-bit** — bisa dimuat |
+| Konsumen library IMS (`DT_NEEDED`) | hanya sesama IMS; `rild` maupun framework tidak menautnya |
+| `imscmservice` | tidak punya definisi service sama sekali |
+| `imsdatadaemon` | `disabled`, hanya dipicu properti yang di-set `imsqmidaemon` |
+
+Jadi yang benar-benar berputar cuma `imsqmidaemon`. Yang dibuang: **tiga biner
+daemon + dua definisi service + pemicu propertinya**. Library, `ims.apk`,
+`imscmlibrary.jar`, dan `imscm.xml` **dipertahankan** — inert, tapi membuangnya
+penghematan ruang, bukan perbaikan bug, dan tiap build sebaiknya hanya membawa satu
+perubahan supaya regresi mudah dilacak (pelajaran dari 10.8).
+
+**Temuan sampingan yang perlu diawasi:** baris alasan ANR lama ternyata
+`executing service org.codeaurora.ims/.ImsService`, dan `am_anr` mencatatnya pada
+proses `com.android.phone`. Artinya `ImsService` dari `ims.apk` berjalan **di dalam**
+proses `com.android.phone`, bukan prosesnya sendiri. ANR itu sudah hilang setelah
+10.7, tapi kalau nanti `com.android.phone` menggantung lagi, `ims.apk` adalah
+tersangka pertama — dan saat itu barulah membuang APK-nya punya dasar bukti.
 
 ### 10.10 `bluetooth.a2dp` dideklarasikan tanpa implementasi
 
