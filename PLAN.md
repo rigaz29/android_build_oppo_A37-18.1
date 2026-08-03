@@ -1233,7 +1233,6 @@ sekali, jadi `IDevice/default` tetap `EMPTY` dan tidak berguna. Instance-nya dit
 
 | Item | Status |
 |---|---|
-| Crash SystemUI `AssistManager` | Bug hulu, perbaikan 1 baris di `frameworks/base` — menunggu keputusan fork platform |
 | Tes fungsional: kamera, audio, panggilan, BT, GPS | Belum satu pun dicoba dipakai |
 | Ledakan `SET_BROADCAST_CONFIG` saat boot | ~110 permintaan gagal lalu berhenti; berisik, tidak merusak |
 | 66 denial avc | Semuanya `permissive=1` — kebersihan policy, bukan bug (10.13) |
@@ -1295,6 +1294,49 @@ hilang: boost untuk interaksi **tanpa** sentuhan (rotasi layar, animasi window l
 `POWER_HINT_INTERACTION`) dan sustained boost saat peluncuran aplikasi.
 
 Terverifikasi di device: `--w--w---- system system`, log `PowerHAL` bersih.
+
+### 10.17 Crash SystemUI `AssistManager` — fork platform pertama
+
+```
+FATAL EXCEPTION: AsyncTask #2
+Process: com.android.systemui
+java.lang.RuntimeException: Can't create handler inside thread
+  Thread[AsyncTask #2,5,main] that has not called Looper.prepare()
+    at com.android.systemui.assist.AssistManager.<init>(AssistManager.java:208)
+    at com.android.systemui.statusbar.phone.StatusBar
+         .lambda$startActivityDismissingKeyguard$16(StatusBar.java:2910)
+    at android.os.AsyncTask$SerialExecutor$1.run
+```
+
+`StatusBar.startActivityDismissingKeyguard` menaruh `mAssistManagerLazy.get()` di dalam
+Runnable yang dijalankan lewat `AsyncTask$SerialExecutor` (`StatusBar.java:2911`). Kalau
+`AssistManager` belum pernah dibangun, Dagger membangunnya di thread itu juga — dan
+`new Handler()` tanpa argumen memakai Looper thread saat ini, yang tidak ada di thread
+AsyncTask.
+
+**Ini bug hulu**, kena semua device LineageOS 18.1, bukan khas A37.
+
+**Perbaikan:** `new Handler(Looper.getMainLooper())`. Looper utama memang yang dimaksud —
+handler ini hanya dipakai `AssistDisclosure` untuk `post(mShowRunnable)` yang memasang
+view lewat `WindowManager` (`AssistDisclosure.java:56-57`).
+
+Sebelum menambal, seluruh paket `assist` disisir dulu: `new Handler()` tanpa Looper hanya
+ada di satu baris itu, dan dependensi konstruktornya (`PhoneStateMonitor`,
+`DefaultUiController`, `AssistHandleBehaviorController`) tidak membuat Handler sama
+sekali. Jadi tidak ada kegagalan berikutnya yang menunggu di belakangnya — pelajaran dari
+10.6, di mana memperbaiki satu simbol RIL hanya memunculkan simbol berikutnya.
+
+**Konsekuensi struktural:** ini fork platform pertama di proyek ini.
+`rigaz29/android_frameworks_base @ lineage-18.1` = satu commit di atas
+`LineageOS/android_frameworks_base @ 557ec5dffbd`. Fork dibuat server-side lewat
+`gh repo fork` sehingga tidak ada unggahan besar; hanya commit-nya yang dikirim.
+
+`A37.xml` sekarang butuh `<remove-project>` untuk `LineageOS/android_frameworks_base`,
+karena path `frameworks/base` sudah dideklarasikan `snippets/lineage.xml`.
+
+> Kalau upstream memperbaikinya sendiri, entri ini **harus dibuang** dan project-nya
+> dikembalikan ke manifest LineageOS — kalau tidak, `frameworks/base` tertahan di commit
+> lama dan ketinggalan patch keamanan.
 
 ### Terverifikasi di device (build 20260803_140427)
 

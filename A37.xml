@@ -71,4 +71,22 @@
        Tidak ada di manifest LineageOS, jadi harus dideklarasikan di sini. -->
   <project name="LineageOS/android_hardware_sony_timekeep" path="hardware/sony/timekeep"
            remote="gh" revision="lineage-18.1" />
+
+  <!-- Platform fork: SATU commit di atas LineageOS/android_frameworks_base
+       @ lineage-18.1 (557ec5dffbd).
+
+       Isinya perbaikan crash SystemUI: AssistManager memanggil new Handler()
+       tanpa argumen, padahal Dagger bisa membangunnya di thread AsyncTask yang
+       tidak punya Looper — lihat Fase 10.17 di PLAN.md.
+
+       Ini bug hulu yang kena semua device LineageOS 18.1, bukan khas A37.
+       Kalau nanti upstream memperbaikinya sendiri, baris ini harus dibuang dan
+       project-nya dikembalikan ke manifest LineageOS, supaya tidak menahan
+       frameworks/base di commit lama.
+
+       remove-project wajib: tanpa itu repo akan menolak karena path
+       frameworks/base sudah dideklarasikan snippets/lineage.xml. -->
+  <remove-project name="LineageOS/android_frameworks_base" />
+  <project name="rigaz29/android_frameworks_base" path="frameworks/base"
+           remote="gh" revision="lineage-18.1" />
 </manifest>
