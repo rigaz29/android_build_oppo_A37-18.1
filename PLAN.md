@@ -775,7 +775,32 @@ pada tree yang **sudah ada** akan menolak:
 repo mengikat metadata git di `.repo/projects/vendor/oppo.git` ke nama project lama.
 Solusinya sekali jalan: `repo sync --force-sync vendor/oppo` — pastikan dulu tidak ada
 commit lokal di `vendor/oppo` yang belum di-push. `repo init` baru dari nol tidak
-terpengaruh. Sudah didokumentasikan di komentar `A37.xml`.
+terpengaruh.
+
+#### ⚠️ KOREKSI: `A37.xml` ternyata malformed sejak Fase 8
+
+Panduan `--force-sync` di atas dulu ditulis di dalam komentar `A37.xml`. Itu **membuat
+seluruh manifest gagal di-parse**, karena spesifikasi XML melarang tanda hubung ganda
+(`--`) muncul di dalam komentar:
+
+```
+error parsing manifest .repo/local_manifests/A37.xml:
+  not well-formed (invalid token): line 20, column 12
+```
+
+Jadi selama ini `repo` menolak berkas itu sepenuhnya — manifest yang seharusnya jadi
+satu-satunya jalan mereproduksi proyek ini tidak bisa dipakai sama sekali.
+
+**Kenapa lolos dari verifikasi Fase 8:** waktu itu saya memastikan keempat
+`project@revision` resolve di remote dengan SHA yang cocok dengan tree kerja. Yang
+tidak saya lakukan: menjalankan `repo` terhadap berkasnya. Saya memverifikasi **isinya**,
+bukan bahwa **alatnya bisa memakannya** — bentuk kesalahan yang sama dengan memverifikasi
+`DT_NEEDED` untuk `TARGET_LD_SHIM_LIBS` di 10.6.
+
+Ditemukan kebetulan saat menjalankan `repo status` sebagai pemeriksaan keamanan sebelum
+menghapus tree. Diperbaiki dengan memindahkan panduan ini ke PLAN.md dan menyisakan
+penunjuk di komentar manifest. Diverifikasi: `ET.parse()` lolos dan keempat project
+terbaca dengan path/name/revision yang benar.
 
 ---
 

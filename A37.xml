@@ -14,19 +14,11 @@
       mka bacon
 
   CATATAN untuk tree yang SUDAH ada dari manifest lama:
-      Nama project vendor berubah dari meghs-playground/rb-vendor_oppo_A37
-      menjadi rigaz29/rb-vendor_oppo_A37. `repo sync` biasa akan menolak:
-
-          --force-sync not enabled; cannot overwrite a local work tree.
-
-      Itu karena repo mengikat metadata git di .repo/projects/vendor/oppo.git
-      ke nama project lama. Jalankan sekali:
-
-          repo sync --force-sync vendor/oppo
-
-      Pastikan dulu tidak ada commit lokal di vendor/oppo yang belum di-push,
-      karena --force-sync menimpa metadata work tree. Untuk `repo init` baru
-      dari nol tidak ada masalah ini.
+      Nama project vendor pernah berubah, sehingga repo bisa menolak sync
+      dengan pesan "force-sync not enabled". Cara mengatasinya ada di PLAN.md
+      bagian Fase 8 — sengaja tidak ditulis di sini karena perintahnya memuat
+      tanda hubung ganda, yang DILARANG di dalam komentar XML dan membuat
+      seluruh berkas ini gagal di-parse repo.
 
   Yang SENGAJA tidak ada di sini:
 
